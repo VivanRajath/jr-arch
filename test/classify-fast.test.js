@@ -5,9 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   CLASSIFIERS, classifierConfig, fastClassify, fastSwarm, answerFor, stateFor,
-  classifierByName, verifyKey,
+  classifierByName, verifyKey, detectClassifier,
 } from '../src/classify-fast.js';
-import { KeyRejected } from '../src/providers.js';
+import { KeyRejected, detectProvider } from '../src/providers.js';
+import { envTemplate } from '../src/env.js';
 import { classify, selectSwarm } from '../src/classify.js';
 import { readManifest, keyEnvs, setClassifier } from '../src/config.js';
 import { readAgents } from '../src/agents.js';
@@ -478,5 +479,42 @@ describe('setClassifier writes the block without losing the file', () => {
     for (const k of ['entry', 'defaultAttempts', 'confidenceFloor', 'degradedFallback']) {
       assert.deepEqual(after[k], before[k], `routing.${k} changed`);
     }
+  });
+});
+
+describe('a router key is recognised by its own prefix', () => {
+  test('jv_live_ is a TypeSafe router key', () => {
+    assert.equal(detectClassifier('jv_live_xjYtTseB0000'), 'typesafe');
+    assert.equal(detectClassifier('jv_test_abc'), 'typesafe');
+  });
+
+  // The reason this check runs BEFORE detectProvider: getting it wrong sends a
+  // router key to a model provider and destroys the working key it replaced.
+  test('no chat provider key is mistaken for a router key', () => {
+    for (const k of ['sk-ant-api03-x', 'gsk_abc', 'sk-or-v1-x', 'xai-abc', 'AIzaSyAbc', 'sk-proj-abc']) {
+      assert.equal(detectClassifier(k), null, `${k} was read as a router key`);
+    }
+  });
+
+  test('and no router key is mistaken for a chat provider key', () => {
+    assert.equal(detectProvider('jv_live_xjYtTseB0000'), null);
+  });
+
+  test('an unrecognised shape is not guessed at', () => {
+    assert.equal(detectClassifier('mystery-key'), null);
+    assert.equal(detectClassifier(''), null);
+    assert.equal(detectClassifier(null), null);
+  });
+
+  // Naming it still works for any shape, which is what makes the prefix a
+  // convenience rather than the only way in.
+  test('naming it works whatever the key looks like', () => {
+    assert.equal(classifierByName('jev'), 'typesafe');
+  });
+
+  test('the .env template offers the router variable too', () => {
+    const t = envTemplate();
+    assert.match(t, /# TYPESAFE_API_KEY=/);
+    assert.match(t, /only picks which agent takes a task/);
   });
 });

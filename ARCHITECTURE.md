@@ -454,8 +454,13 @@ would bump *every* task up a tier.
 
 **Adding the key.** A chat provider proves its key with `listModels`; a System
 One model publishes no list, so `verifyKey()` asks the smallest real question
-instead — one two-option choice — and a 200 is the proof. `jr-arch key jev
-<key>` (aliases resolve through `classifierByName`) verifies first, then writes
+instead — one two-option choice — and a 200 is the proof. A `jv_live_…` key is
+recognised by `detectClassifier()`, which runs **before** `detectProvider()`
+because the damage only runs one way: a router key written into the model's
+variable is sent to the model's provider on the next request, and the working
+key it replaced is gone. Naming it (`jr-arch key jev <key>`, aliases via
+`classifierByName`) works for any shape, and nothing is ever inferred from
+`sk-` — that is an OpenAI key. Either route verifies first, then writes
 the key and `setClassifier()` writes the `routing.classifier` block. Both, in
 that order: a key saved without the block is a key nothing reads, and a block
 written against a key that does not work makes every run print the fallback

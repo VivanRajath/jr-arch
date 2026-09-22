@@ -468,8 +468,12 @@ generates no text, so it can pick an agent but can never run one.
    table, `keyEnvs()` already picks the key up, `config show` already names the
    destination, and `jr-arch key <alias> <key>` and the setup offer both route
    through `verifyKey()` + `setClassifier()`.
-5. Key detection is by NAME, never by prefix. A TypeSafe key starts `sk-` and so
-   does an OpenAI one; guessing would write a router key into `OPENAI_API_KEY`.
+5. Give it a `keyPattern` only if its prefix cannot collide with a chat
+   provider's. TypeSafe keys are `jv_live_…`, which is safe; the `sk-…` form the
+   published docs showed is NOT — that is an OpenAI key, and writing a router
+   key into `OPENAI_API_KEY` sends it to the wrong company and loses the key it
+   replaced. `detectClassifier()` runs BEFORE `detectProvider()` for that
+   reason, and naming the provider stays the way in for any shape.
 6. Tests, in `test/classify-fast.test.js`: the request shape, a good answer, a
    missing confidence, an option outside the supplied set, every failure mode
    returning `null`, and — for the key path — that `verifyKey` reads the key

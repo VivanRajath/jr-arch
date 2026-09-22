@@ -47,8 +47,27 @@ export const CLASSIFIERS = {
     // What someone types. People say "jev" — the model — far more often than
     // "typesafe", the company, so both reach the same entry.
     aliases: ['jev', 'typesafe.ai', 'systemone', 'system-one'],
+    // `jv_live_…`. Distinct from every chat provider's prefix, so unlike the
+    // `sk-` the published docs show, this one can be recognised without any
+    // chance of sending a router key to OpenAI.
+    keyPattern: /^jv_/,
   },
 };
+
+/**
+ * Is this a router key rather than a model key?
+ *
+ * Checked BEFORE `detectProvider`, because a router key must never be written
+ * into a chat provider's variable — that is the key going to the wrong company
+ * on the next request. A prefix is a convention rather than a contract, so a
+ * key that matches nothing still reaches the right place by being named
+ * (`jr-arch key jev <key>`).
+ */
+export function detectClassifier(key) {
+  const k = String(key ?? '').trim();
+  if (!k) return null;
+  return Object.keys(CLASSIFIERS).find((id) => CLASSIFIERS[id].keyPattern?.test(k)) ?? null;
+}
 
 /** The registry id for whatever the user typed, or null. */
 export function classifierByName(name) {

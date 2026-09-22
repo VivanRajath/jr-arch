@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { agentDir, repoRoot } from './paths.js';
 import { keyEnvs, modelFor, addSavedKey, readManifest, patchSection, patchTierModel, setClassifier } from './config.js';
 import { PROVIDERS, detectProvider, providerFor, KeyRejected } from './providers.js';
-import { CLASSIFIERS, classifierByName, verifyKey } from './classify-fast.js';
+import { CLASSIFIERS, classifierByName, verifyKey, detectClassifier } from './classify-fast.js';
 import { readAgents } from './agents.js';
 import { c, ok, info, warn } from './util.js';
 
@@ -141,6 +141,11 @@ export function envTemplate() {
     '# and /prompt when choosing which key an agent uses.',
     '#',
     ...Object.values(PROVIDERS).filter((p) => !p.noKey && p.keyPattern).map((p) => `# ${p.keyEnv}=`),
+    '#',
+    '# Optional. Not a model — it only picks which agent takes a task, faster and',
+    '# with a calibrated confidence. Adding it here also needs routing.classifier',
+    '# in agent.yaml; `jr-arch key jev <key>` does both.',
+    ...Object.values(CLASSIFIERS).map((p) => `# ${p.keyEnv}=`),
     '',
   ].join('\n');
 }
@@ -414,10 +419,12 @@ export async function key(positional, flags, { manifest }) {
 
   // `jr-arch key jev <key>` — a router key, not an agent key.
   //
-  // It has to be named rather than detected: a TypeSafe key starts `sk-`, and
-  // so does an OpenAI one. Guessing wrong here writes a router key into
-  // OPENAI_API_KEY and sends it to the wrong company on the next request,
-  // which is exactly what detectProvider's ordering exists to prevent.
+  // Naming it always works, whatever the key looks like. A `jv_` key is also
+  // recognised on sight just below — but a prefix is a convention, not a
+  // contract, so the named form stays the way in for a key shape we have not
+  // seen. Never inferred from `sk-`: that is an OpenAI key, and writing a
+  // router key into OPENAI_API_KEY sends it to the wrong company on the next
+  // request and loses the working key it replaced.
   const named = classifierByName(action);
   const asRouter = named ?? (flags.classifier === true ? 'typesafe' : null);
   if (asRouter) {
@@ -426,6 +433,16 @@ export async function key(positional, flags, { manifest }) {
     // and is told to type `typesafe` reasonably wonders which one is wrong.
     if (!value) throw new Error(`Usage: jr-arch key ${named ? String(action) : 'jev'} <your-key>`);
     return routerKey(asRouter, value.trim(), manifest);
+  }
+
+  // A router key recognised by its own prefix. Checked before detectProvider,
+  // because the damage of getting this wrong runs one way: a `jv_` key written
+  // into the model's variable is sent to the model's provider on the next
+  // request, and the working key it replaced is gone.
+  const asPrefix = value ? detectClassifier(value.trim()) : null;
+  if (asPrefix) {
+    info(`That looks like a ${c.b(CLASSIFIERS[asPrefix].label)} router key ${c.d(fingerprint(value.trim()))}`);
+    return routerKey(asPrefix, value.trim(), manifest);
   }
 
   if (!value) {

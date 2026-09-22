@@ -592,8 +592,13 @@ Or let jr-arch do both at once — paste the key and it verifies it, saves it to
 `.gitagent/.env`, and writes the block for you:
 
 ```bash
-jr-arch key jev sk-...        # "typesafe" and "system-one" work too
+jr-arch key jv_live_...       # recognised on sight
+jr-arch key jev <any-key>     # or name it: "typesafe" and "system-one" work too
 ```
+
+Paste a `jv_live_…` key anywhere jr-arch asks for a key — including at setup —
+and it is recognised as a router rather than a model, so it never lands in your
+model provider's variable.
 
 It checks the key before saving anything: a key that does not work leaves your
 config exactly as it was, rather than switching routing on against a key that

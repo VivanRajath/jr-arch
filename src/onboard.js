@@ -6,7 +6,7 @@ import { readManifest, patchSection, setModelMaxTokens, setTokensPerMinute, addS
 import { writeKey, ensureIgnored, fingerprint, nextKeyEnv, ensureEnvFile } from './env.js';
 import { PROVIDERS, detectProvider, providerFor, listModels, KeyRejected } from './providers.js';
 import { parseRateLimits, probeModel, printProviderLimits, suggestedCap } from './limits.js';
-import { CLASSIFIERS, verifyKey } from './classify-fast.js';
+import { CLASSIFIERS, verifyKey, detectClassifier } from './classify-fast.js';
 import { printTree } from './tree.js';
 import { isRepo, headSha, initialCommit } from './session.js';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -43,7 +43,10 @@ export async function onboard(prompter, { fetchImpl = fetch, root = repoRoot() }
 
   // --- 1. key ---------------------------------------------------------------
   step(1, 'Connect an AI provider');
-  const conn = await obtainKey(prompter, { fetchImpl });
+  // A router key pasted at step 1 is kept here rather than lost, and used
+  // below instead of asking for it a second time.
+  const stashed = [];
+  const conn = await obtainKey(prompter, { fetchImpl, stash: stashed });
   if (!conn) return null;
   const extra = await moreKeys(prompter, conn, { fetchImpl });
 
@@ -72,7 +75,7 @@ export async function onboard(prompter, { fetchImpl = fetch, root = repoRoot() }
   // Offered here, right after the key's per-minute allowance is on screen,
   // because that is when the pitch is concrete: picking an agent currently
   // spends the same minute the work does.
-  const router = await offerRouter(prompter, { fetchImpl, limits });
+  const router = await offerRouter(prompter, { fetchImpl, limits, stash: stashed });
 
   // --- 3. scaffold ----------------------------------------------------------
   step(3, 'Create your agent folder');
@@ -228,7 +231,27 @@ export async function ensureRepo(prompter, root = repoRoot()) {
  * Returns null for no, an unusable key, or a declined prompt — in every one of
  * those cases the tool works exactly as it does today.
  */
-export async function offerRouter(prompter, { fetchImpl = fetch, limits = null } = {}) {
+export async function offerRouter(prompter, { fetchImpl = fetch, limits = null, stash = [] } = {}) {
+  // Already pasted at step 1: verify and use it, rather than asking again for
+  // a key the person has already handed over.
+  const already = stash[0];
+  if (already) {
+    const spec0 = CLASSIFIERS[already.provider];
+    console.log();
+    process.stdout.write(`  ${c.d(`Checking the ${spec0.label} key you pasted…`)} `);
+    try {
+      const found = await verifyKey({ provider: already.provider, key: already.key, fetchImpl });
+      console.log(c.g('works'));
+      ok(`${c.b(found.model)} ${c.d('· routes tasks, does not run them')}`);
+      return { provider: already.provider, keyEnv: found.keyEnv, key: already.key, model: found.model };
+    } catch (e) {
+      console.log(c.r('failed'));
+      warn(e.message);
+      info(c.d('Carrying on without it — routing uses your model.'));
+      return null;
+    }
+  }
+
   const spec = CLASSIFIERS.typesafe;
   console.log();
   info(`${c.b('Optional')} ${c.d('— a fast router picks which agent takes each task.')}`);
@@ -262,7 +285,7 @@ export async function offerRouter(prompter, { fetchImpl = fetch, limits = null }
   }
 }
 
-export async function obtainKey(prompter, { fetchImpl = fetch, attempts = 3 } = {}) {
+export async function obtainKey(prompter, { fetchImpl = fetch, attempts = 3, stash = [] } = {}) {
   info(`Paste an API key. ${c.d('Supported: Anthropic, Gemini, Groq, OpenAI, OpenRouter, xAI — or type')} ${c.c('ollama')} ${c.d('for a local model.')}`);
 
   for (let tries = 0; tries < attempts; tries++) {
@@ -274,6 +297,20 @@ export async function obtainKey(prompter, { fetchImpl = fetch, attempts = 3 } = 
     let provider;
     let key = entered;
     let baseUrl = null;
+
+    // A router key pasted where a model key was asked for. It cannot run an
+    // agent, so it cannot answer this step — but throwing it away and making
+    // someone find it again is the wrong correction. Keep it, say what it is,
+    // and ask again for the key this step actually needs.
+    const router = detectClassifier(entered);
+    if (router) {
+      const spec = CLASSIFIERS[router];
+      info(`That is ${c.b(spec.label)} ${c.d(fingerprint(entered))} — a router key.`);
+      info(c.d('It picks which agent takes a task; it cannot run one, so it is not a model.'));
+      stash.push({ provider: router, key: entered });
+      info(c.d('Saved for later. Now paste the key for the model your agents will use.'));
+      continue;
+    }
 
     if (/^ollama$/i.test(entered)) {
       provider = 'ollama';
