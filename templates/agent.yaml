@@ -60,3 +60,17 @@ routing:
   # agent by priority, which is right whatever your agents are called — name
   # one here only if you want a different answer.
   # degraded_fallback: senior-dev
+  #
+  # Optional: pick the entry agent with a System One model instead of the model
+  # above. It returns one option out of your installed agents with a CALIBRATED
+  # probability, which is what classifier_confidence_floor above is really
+  # asking for — a model's estimate of its own answer is a guess about a guess.
+  #
+  # Commented out on purpose. Switching it on sends the task text and the
+  # repository's file list to a SECOND provider, so it is yours to turn on, not
+  # ours. Everything else about the run is unchanged, and if the call fails or
+  # the key is missing the model above classifies as it does today.
+  #
+  # classifier:
+  #   provider: typesafe          # key from console.typesafe.ai/settings/keys
+  #   api_key_env: TYPESAFE_API_KEY

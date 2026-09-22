@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { agentDir } from './paths.js';
 import { parseYaml } from './yaml.js';
 import { readAgents } from './agents.js';
+import { classifierConfig } from './classify-fast.js';
 import { c, ok, info } from './util.js';
 
 function manifestPath() {
@@ -334,6 +335,11 @@ export function readManifest(file = manifestPath()) {
     // is unset, which works whatever the installed agents are called.
     degradedFallback: nil(routing.degraded_fallback),
 
+    // An optional System One model for tier selection — see classify-fast.js.
+    // Null is the normal answer: absent means nobody asked for one, and no
+    // call is ever made. Never a key, the same rule the model block follows.
+    classifier: classifierOf(routing.classifier),
+
     // Absent until a pack is installed; `pull` reads it to know where to go
     // back to, and readManifest is the one reader of this file.
     source:   doc.source ?? null,
@@ -390,6 +396,25 @@ export function modelFor(manifest, tier) {
   };
 }
 
+/**
+ * The `routing.classifier` block, or null.
+ *
+ * Deliberately narrow: a provider, optionally a model, an env var NAME and a
+ * base_url. No key, ever — the same rule the `model:` block follows, for the
+ * same reason. Anything else in the block is ignored rather than carried,
+ * because a classifier is not a place to configure a second agent runtime.
+ */
+function classifierOf(block) {
+  if (!block || typeof block !== 'object' || Array.isArray(block)) return null;
+  if (!block.provider) return null;
+  return {
+    provider: String(block.provider),
+    model: block.model ? String(block.model) : null,
+    keyEnv: block.api_key_env ? String(block.api_key_env) : null,
+    baseUrl: block.base_url ? String(block.base_url) : null,
+  };
+}
+
 /** Every env var name the manifest references: base, per-tier, and saved keys. */
 export function keyEnvs(manifest) {
   const names = new Set();
@@ -398,6 +423,9 @@ export function keyEnvs(manifest) {
     if (spec?.model?.api_key_env) names.add(String(spec.model.api_key_env));
   }
   for (const k of manifest.keys ?? []) names.add(k.keyEnv);
+  // The classifier's key lives in .gitagent/.env like every other one, so it
+  // has to be a name loadEnv knows to fill.
+  if (manifest.classifier?.keyEnv) names.add(manifest.classifier.keyEnv);
   return [...names];
 }
 
@@ -483,6 +511,18 @@ export async function config(positional, _flags) {
     }
     console.log(c.b('  routing'));
     info(`entry        ${m.entry}`);
+    // A configured classifier is a SECOND destination for the task text and
+    // the file list, so it is named here rather than left implicit. "Which
+    // providers can my code be sent to from here" has to have a complete
+    // answer somewhere, and this is where someone looks for it.
+    const cls = classifierConfig(m);
+    if (cls) {
+      const set = process.env[cls.keyEnv] ? c.g('set') : c.y('not set');
+      info(`classifier   ${cls.model}  ${c.d(`${cls.label} · ${cls.keyEnv} ${set}`)}`);
+      info(`             ${c.d(`tier selection is sent to ${cls.baseUrl}`)}`);
+    } else {
+      info(`classifier   ${c.d('—  (tier selection uses the model above)')}`);
+    }
     console.log();
     return;
   }

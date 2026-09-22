@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { agentDir } from './paths.js';
 import { callModel, extractJson } from './provider.js';
 import { readAgents, escalatesTo, buildFixer } from './agents.js';
+import { fastClassify, fastSwarm } from './classify-fast.js';
 
 /**
  * Tier selection. One model call returning strict JSON {tier, confidence,
@@ -49,6 +50,8 @@ export async function classify({
   agents = [],
   dir = agentDir(),
   call = callModel,
+  fast = fastClassify,
+  onNotice = null,
 } = {}) {
   const roster = agents.length ? agents : readAgents(dir);
   const tiers = roster.map((a) => a.name);
@@ -75,6 +78,21 @@ export async function classify({
   }
 
   const rules = duties ?? readDuties(dir);
+  const floor = manifest.confidenceFloor ?? 0.6;
+
+  // 3. A configured System One model answers this exact question — a closed
+  //    set of options with a calibrated probability — in a fraction of the
+  //    time and without generating a token of prose. It is opt-in and it is
+  //    allowed to decline: null here means the user configured none, or the
+  //    call failed, and the model below picks the task up either way.
+  //
+  //    Its confidence goes through the SAME floor as the model's, which is
+  //    most of the reason to use it. The number a model reports about its own
+  //    answer is a guess about a guess; a calibrated one makes the floor bump
+  //    mean what `routing.classifier_confidence_floor` says it means.
+  const quick = await fast({ task, buildGreen, files, agents: roster, duties: rules, manifest, onNotice });
+  if (quick) return withFloor(quick, roster, fallback, floor);
+
   const response = await call(manifest, {
     system: `${SYSTEM}\n\nAvailable tiers, as they describe themselves:\n${describeAgents(roster)}\n\n--- DUTIES.md ---\n${rules}`,
     messages: [{ role: 'user', content: prompt(task, buildGreen, files) }],
@@ -100,23 +118,31 @@ export async function classify({
 
   const confidence = clamp(parsed.confidence);
   const reason = typeof parsed.reason === 'string' ? parsed.reason.trim() : '';
-  const floor = manifest.confidenceFloor ?? 0.6;
 
-  // 4. Below the floor, route one tier UP.
-  if (confidence < floor) {
-    const bumped = bump(tier, roster, fallback);
-    if (bumped !== tier) {
-      return {
-        tier: bumped,
-        confidence,
-        reason: `${reason || 'no reason given'} (confidence ${confidence} below floor ${floor}; routed up from ${tier})`,
-        source: 'floor-bump',
-        classified: tier,
-      };
-    }
-  }
+  return withFloor({ tier, confidence, reason, source: 'model' }, roster, fallback, floor);
+}
 
-  return { tier, confidence, reason, source: 'model' };
+/**
+ * Below the floor, route one tier UP.
+ *
+ * Shared by both classifier paths on purpose. The floor is a safety rule about
+ * what to do with an uncertain answer, and it cannot depend on which kind of
+ * model produced the uncertainty — a second copy of this is a second place for
+ * the bump to quietly stop happening.
+ */
+function withFloor(result, roster, fallback, floor) {
+  const { tier, confidence, reason } = result;
+  if (confidence >= floor) return result;
+
+  const bumped = bump(tier, roster, fallback);
+  if (bumped === tier) return result;
+  return {
+    ...result,
+    tier: bumped,
+    reason: `${reason || 'no reason given'} (confidence ${confidence} below floor ${floor}; routed up from ${tier})`,
+    source: 'floor-bump',
+    classified: tier,
+  };
 }
 
 /**
@@ -221,8 +247,13 @@ Name only agents whose own scope the task genuinely touches — they will run at
 the same time, and each one costs the user a model call. One agent is a normal
 answer. Never invent a name that is not listed.`;
 
-export async function selectSwarm({ task, agents, manifest, call = callModel } = {}) {
+export async function selectSwarm({ task, agents, manifest, call = callModel, fast = fastSwarm } = {}) {
   if (!task || !agents?.length) return null;
+
+  // A subset question is one boolean per agent, which a System One model
+  // answers in one request and cannot answer with a name that does not exist.
+  const quick = await fast({ task, agents, manifest });
+  if (quick) return quick;
 
   try {
     const response = await call(manifest, {
