@@ -2,10 +2,11 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { agentDir, repoRoot } from './paths.js';
 import { init } from './init.js';
-import { readManifest, patchSection, setModelMaxTokens, setTokensPerMinute, addSavedKey } from './config.js';
+import { readManifest, patchSection, setModelMaxTokens, setTokensPerMinute, addSavedKey, setClassifier } from './config.js';
 import { writeKey, ensureIgnored, fingerprint, nextKeyEnv, ensureEnvFile } from './env.js';
 import { PROVIDERS, detectProvider, providerFor, listModels, KeyRejected } from './providers.js';
 import { parseRateLimits, probeModel, printProviderLimits, suggestedCap } from './limits.js';
+import { CLASSIFIERS, verifyKey } from './classify-fast.js';
 import { printTree } from './tree.js';
 import { isRepo, headSha, initialCommit } from './session.js';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -68,6 +69,11 @@ export async function onboard(prompter, { fetchImpl = fetch, root = repoRoot() }
   }
   const cap = suggestedCap(limits);
 
+  // Offered here, right after the key's per-minute allowance is on screen,
+  // because that is when the pitch is concrete: picking an agent currently
+  // spends the same minute the work does.
+  const router = await offerRouter(prompter, { fetchImpl, limits });
+
   // --- 3. scaffold ----------------------------------------------------------
   step(3, 'Create your agent folder');
   const dir = agentDir();
@@ -106,6 +112,17 @@ export async function onboard(prompter, { fetchImpl = fetch, root = repoRoot() }
       process.env[k.keyEnv] = k.key;
     }
     addSavedKey({ provider: k.provider, keyEnv: k.keyEnv, baseUrl: k.baseUrl }, join(dir, 'agent.yaml'));
+  }
+
+  // The router key, and the block that makes anything read it. A key saved
+  // without the block is a key nothing uses.
+  if (router) {
+    ensureIgnored(root);
+    writeKey(router.keyEnv, router.key);
+    process.env[router.keyEnv] = router.key;
+    try {
+      setClassifier({ provider: router.provider, keyEnv: router.keyEnv }, join(dir, 'agent.yaml'));
+    } catch { /* the key is saved; config show will report it unset */ }
   }
 
   ok(`Created ${c.c('.gitagent/')}`);
@@ -201,6 +218,50 @@ export async function ensureRepo(prompter, root = repoRoot()) {
  * person is still looking at the prompt and can paste it again, rather than as
  * a 401 on their first real task.
  */
+/**
+ * Offer a System One router, and take its key if the answer is yes.
+ *
+ * Optional, defaulted to no, and skipped entirely rather than asked twice: a
+ * setup flow that pushes a second paid service on someone who came here to
+ * write code has mis-read the room. It is worth ONE line.
+ *
+ * Returns null for no, an unusable key, or a declined prompt — in every one of
+ * those cases the tool works exactly as it does today.
+ */
+export async function offerRouter(prompter, { fetchImpl = fetch, limits = null } = {}) {
+  const spec = CLASSIFIERS.typesafe;
+  console.log();
+  info(`${c.b('Optional')} ${c.d('— a fast router picks which agent takes each task.')}`);
+  // Only claimed when we actually measured a ceiling, so it cannot be wrong.
+  if (limits?.rows?.some((r) => r.key === 'tokens')) {
+    info(c.d('Right now that choice spends the same per-minute allowance as the work.'));
+  }
+  info(c.d(`${spec.label} answers it in under a second, and it is not a chat model —`));
+  info(c.d('it cannot run an agent, only choose one. Your code still goes nowhere new.'));
+
+  if (!(await prompter.confirm(`Add a ${spec.label} key?`, false))) return null;
+
+  const raw = await prompter.secret(`${spec.label} key:`);
+  if (raw === null || !raw.trim()) {
+    info(c.d('Skipped. Add one later with `jr-arch key jev <your-key>`.'));
+    return null;
+  }
+
+  process.stdout.write(`  ${c.d('Checking the key…')} `);
+  try {
+    const found = await verifyKey({ provider: 'typesafe', key: raw.trim(), fetchImpl });
+    console.log(c.g('works'));
+    ok(`${c.b(found.model)} ${c.d('· routes tasks, does not run them')}`);
+    return { provider: 'typesafe', keyEnv: found.keyEnv, key: raw.trim(), model: found.model };
+  } catch (e) {
+    console.log(c.r('failed'));
+    warn(e.message);
+    info(c.d(`Skipping it — routing uses your model. Add one later with \`jr-arch key jev <your-key>\`.`));
+    if (e instanceof KeyRejected) info(c.d(`Keys: ${spec.signup}`));
+    return null;
+  }
+}
+
 export async function obtainKey(prompter, { fetchImpl = fetch, attempts = 3 } = {}) {
   info(`Paste an API key. ${c.d('Supported: Anthropic, Gemini, Groq, OpenAI, OpenRouter, xAI — or type')} ${c.c('ollama')} ${c.d('for a local model.')}`);
 

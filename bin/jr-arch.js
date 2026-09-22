@@ -58,6 +58,7 @@ ${c.b('COMMANDS')}
   add-guard <git-url>   Install a guardrail file
   agents                List installed agents
   key [<value>]         Store an API key, or show which are set
+  key jev <value>       Store a Jev router key and turn fast routing on
   limits [set|unset]    Provider rate limits, and each agent's reply cap
   config                Show or change model, provider, and routing
   init                  Scaffold .gitagent/ without the guided setup

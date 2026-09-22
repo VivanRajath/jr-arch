@@ -177,7 +177,7 @@ describe('npx jr-arch, first run', () => {
     const root = emptyRepo();
     delete process.env.GROQ_API_KEY;
     await inRepo(root, async () => {
-      const p = scriptedPrompter(['gsk_first_run_key_1234567', 'n', '1', '3', '/exit']);
+      const p = scriptedPrompter(['gsk_first_run_key_1234567', 'n', '1', 'n', '3', '/exit']);
       await chat([], {}, { prompter: p, fetchImpl: modelsFetch(['llama-3.3-70b-versatile']) });
 
       const dir = join(root, '.gitagent');
@@ -199,7 +199,7 @@ describe('npx jr-arch, first run', () => {
     delete process.env.GROQ_API_KEY;
     await inRepo(root, async () => {
       await chat([], {}, {
-        prompter: scriptedPrompter(['gsk_secret_value_9876543', 'n', '1', '3', '/exit']),
+        prompter: scriptedPrompter(['gsk_secret_value_9876543', 'n', '1', 'n', '3', '/exit']),
         fetchImpl: modelsFetch(['m']),
       });
       const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: root, encoding: 'utf8' });
@@ -461,6 +461,7 @@ describe('more than one API key', () => {
         'y', 'sk-ant-api03-another-key',   // another: Anthropic
         'n',                               // no more
         '1',                               // the default model
+        'n',                               // no fast router
         '3',                               // start in the chat
         '/exit',
       ]);
@@ -491,7 +492,7 @@ describe('more than one API key', () => {
         prompter: scriptedPrompter([
           'gsk_first_account_1234567',
           'y', 'gsk_second_account_7654321',
-          'n', '1', '3', '/exit',
+          'n', '1', 'n', '3', '/exit',
         ]),
         fetchImpl: byHost({ 'groq.com': ['llama-3.3-70b-versatile'] }),
       });

@@ -462,13 +462,23 @@ generates no text, so it can pick an agent but can never run one.
 2. If its wire shape differs, extend `ask()` for the request and `answerFor()`
    for the response. Keep `answerFor` returning `null` for anything it cannot
    read; a guess is worse than a fallback.
-3. Nothing else should need touching: `classifierConfig()` resolves through the
-   table, `keyEnvs()` already picks the key up, and `config show` already names
-   the destination.
-4. Tests, in `test/classify-fast.test.js`: the request shape, a good answer, a
-   missing confidence, an option outside the supplied set, and every failure
-   mode returning `null`.
-5. Do **not** wire it into anything that enforces. The import test at the
+3. Add `aliases` for whatever people will actually type — users say the model's
+   name far more often than the company's.
+4. Nothing else should need touching: `classifierConfig()` resolves through the
+   table, `keyEnvs()` already picks the key up, `config show` already names the
+   destination, and `jr-arch key <alias> <key>` and the setup offer both route
+   through `verifyKey()` + `setClassifier()`.
+5. Key detection is by NAME, never by prefix. A TypeSafe key starts `sk-` and so
+   does an OpenAI one; guessing would write a router key into `OPENAI_API_KEY`.
+6. Tests, in `test/classify-fast.test.js`: the request shape, a good answer, a
+   missing confidence, an option outside the supplied set, every failure mode
+   returning `null`, and — for the key path — that `verifyKey` reads the key
+   from its argument rather than `process.env`, since the key being checked has
+   not been saved yet.
+7. Adding an onboarding question means every `scriptedPrompter` script through
+   `onboard()` needs one more answer; the prompter throws rather than
+   defaulting, which is how you find them.
+8. Do **not** wire it into anything that enforces. The import test at the
    bottom of that file exists to catch it.
 
 ---

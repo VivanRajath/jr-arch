@@ -1,8 +1,9 @@
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { agentDir, repoRoot } from './paths.js';
-import { keyEnvs, modelFor, addSavedKey, readManifest, patchSection, patchTierModel } from './config.js';
-import { PROVIDERS, detectProvider, providerFor } from './providers.js';
+import { keyEnvs, modelFor, addSavedKey, readManifest, patchSection, patchTierModel, setClassifier } from './config.js';
+import { PROVIDERS, detectProvider, providerFor, KeyRejected } from './providers.js';
+import { CLASSIFIERS, classifierByName, verifyKey } from './classify-fast.js';
 import { readAgents } from './agents.js';
 import { c, ok, info, warn } from './util.js';
 
@@ -342,6 +343,57 @@ export function keySource(name) {
 // Command
 // ---------------------------------------------------------------------------
 
+/**
+ * Save a System One router key, prove it, and switch routing on.
+ *
+ * The same three steps every other key gets — ignore the file first, write
+ * 0600, prove the key by reaching the provider — plus the one thing a router
+ * needs that an agent key does not: the `routing.classifier` block, so the
+ * key is actually reachable by the thing that would use it. A key saved
+ * without it is a key nothing reads.
+ *
+ * The block is written only after the key checks out. Enabling routing
+ * against a key that does not work would make every run print the fallback
+ * notice, which reads as a broken tool rather than a rejected key.
+ */
+async function routerKey(provider, value, manifest, { fetchImpl = fetch } = {}) {
+  const spec = CLASSIFIERS[provider];
+  console.log();
+  process.stdout.write(`  ${c.d(`Checking the ${spec.label} key…`)} `);
+
+  let info_;
+  try {
+    info_ = await verifyKey({ provider, key: value, fetchImpl });
+    console.log(c.g('works'));
+  } catch (e) {
+    console.log(c.r('failed'));
+    warn(e.message);
+    if (e instanceof KeyRejected) info(`Get or check a key at ${c.c(spec.signup)}`);
+    info(c.d('Nothing was saved and routing is unchanged.'));
+    console.log();
+    return;
+  }
+
+  ok(`${c.b(info_.model)} ${c.d('· routes tasks to an agent, does not run one')}`);
+
+  const alreadyIgnored = ensureIgnored();
+  writeKey(spec.keyEnv, value);
+  ok(`${c.c(spec.keyEnv)} written to ${c.c('.gitagent/.env')} — ${fingerprint(value)}`);
+  if (!alreadyIgnored) info('added .gitagent/.env to .gitignore');
+
+  try {
+    setClassifier({ provider, keyEnv: spec.keyEnv });
+    ok(`routing.classifier set in ${c.c('.gitagent/agent.yaml')}`);
+    info(`tier selection now goes to ${c.c(spec.base)} ${c.d('— your code still only reaches your model provider')}`);
+    info(c.d('If it is ever unreachable the run says so and your model classifies instead.'));
+  } catch (e) {
+    warn(`The key is saved, but agent.yaml could not be updated: ${e.message}`);
+    info('Add this under routing: by hand:');
+    console.log(c.d(`    classifier:\n      provider: ${provider}\n      api_key_env: ${spec.keyEnv}`));
+  }
+  console.log();
+}
+
 export async function key(positional, flags, { manifest }) {
   let name = typeof flags.env === 'string' ? flags.env : manifest.keyEnv;
   if (!name) {
@@ -358,7 +410,23 @@ export async function key(positional, flags, { manifest }) {
 
   // `jr-arch key <value>` and `jr-arch key set <value>` both work; someone
   // reaching for this command is not in the mood to read a usage line.
-  const value = action === 'set' ? positional[1] : action;
+  let value = action === 'set' ? positional[1] : action;
+
+  // `jr-arch key jev <key>` — a router key, not an agent key.
+  //
+  // It has to be named rather than detected: a TypeSafe key starts `sk-`, and
+  // so does an OpenAI one. Guessing wrong here writes a router key into
+  // OPENAI_API_KEY and sends it to the wrong company on the next request,
+  // which is exactly what detectProvider's ordering exists to prevent.
+  const named = classifierByName(action);
+  const asRouter = named ?? (flags.classifier === true ? 'typesafe' : null);
+  if (asRouter) {
+    if (named) value = positional[1];
+    // Echo the word they typed, not the registry id: someone who typed `jev`
+    // and is told to type `typesafe` reasonably wonders which one is wrong.
+    if (!value) throw new Error(`Usage: jr-arch key ${named ? String(action) : 'jev'} <your-key>`);
+    return routerKey(asRouter, value.trim(), manifest);
+  }
 
   if (!value) {
     console.log();

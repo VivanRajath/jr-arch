@@ -1,12 +1,15 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, cpSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   CLASSIFIERS, classifierConfig, fastClassify, fastSwarm, answerFor, stateFor,
+  classifierByName, verifyKey,
 } from '../src/classify-fast.js';
+import { KeyRejected } from '../src/providers.js';
 import { classify, selectSwarm } from '../src/classify.js';
-import { readManifest, keyEnvs } from '../src/config.js';
+import { readManifest, keyEnvs, setClassifier } from '../src/config.js';
 import { readAgents } from '../src/agents.js';
 import { TEMPLATES } from '../src/paths.js';
 
@@ -355,6 +358,125 @@ describe('it never decides enforcement', () => {
     for (const file of ['hooks.js', 'tools.js', 'verify.js', 'session.js']) {
       const src = readFileSync(join(import.meta.dirname, '..', 'src', file), 'utf8');
       assert.ok(!src.includes('classify-fast'), `${file} imports the System One classifier`);
+    }
+  });
+});
+
+describe('adding a Jev key, the way other providers are added', () => {
+  const okRes = (body, status = 200) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  });
+
+  test('people type the model name, not the company', () => {
+    assert.equal(classifierByName('jev'), 'typesafe');
+    assert.equal(classifierByName('JEV'), 'typesafe');
+    assert.equal(classifierByName('typesafe'), 'typesafe');
+    assert.equal(classifierByName('system-one'), 'typesafe');
+    assert.equal(classifierByName('groq'), null, 'a chat provider is not a router');
+    assert.equal(classifierByName(''), null);
+  });
+
+  test('a working key reports the model it reaches', async () => {
+    const seen = [];
+    const fetchImpl = async (url, init) => { seen.push({ url, init }); return okRes({ answers: { ok: { choice: 'yes' } } }); };
+    const found = await verifyKey({ key: 'sk-good', fetchImpl });
+    assert.equal(found.model, 'jev-latest');
+    assert.equal(found.keyEnv, 'TYPESAFE_API_KEY');
+    assert.equal(seen[0].url, 'https://api.typesafe.ai/v1/systemone');
+    assert.equal(seen[0].init.headers.authorization, 'Bearer sk-good');
+  });
+
+  // The key being checked has not been saved yet, so it must not be read from
+  // the environment the way a configured one is.
+  test('the key under test comes from the argument, not process.env', async () => {
+    const had = process.env.TYPESAFE_API_KEY;
+    process.env.TYPESAFE_API_KEY = 'sk-a-different-saved-key';
+    try {
+      let sent = null;
+      await verifyKey({ key: 'sk-the-one-being-checked', fetchImpl: async (u, i) => { sent = i.headers.authorization; return okRes({}); } });
+      assert.equal(sent, 'Bearer sk-the-one-being-checked');
+    } finally {
+      if (had === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = had;
+    }
+  });
+
+  test('a refused key is a KeyRejected, not a generic failure', async () => {
+    await assert.rejects(
+      () => verifyKey({ key: 'sk-bad', fetchImpl: async () => okRes({ error: 'nope' }, 401) }),
+      (e) => e instanceof KeyRejected,
+    );
+  });
+
+  test('a server error is not a refused key', async () => {
+    await assert.rejects(
+      () => verifyKey({ key: 'sk-x', fetchImpl: async () => okRes({}, 500) }),
+      (e) => !(e instanceof KeyRejected) && /500/.test(e.message),
+    );
+  });
+
+  test('a network failure never carries the key', async () => {
+    await assert.rejects(
+      () => verifyKey({ key: 'sk-secret-abc', fetchImpl: async () => { throw new Error('getaddrinfo sk-secret-abc'); } }),
+      (e) => !e.message.includes('sk-secret-abc') && /\[redacted\]/.test(e.message),
+    );
+  });
+});
+
+describe('setClassifier writes the block without losing the file', () => {
+  const scratch = () => {
+    const d = mkdtempSync(join(tmpdir(), 'jr-cls-'));
+    const f = join(d, 'agent.yaml');
+    cpSync(join(TEMPLATES, 'agent.yaml'), f);
+    return f;
+  };
+
+  test('it appends an active block and readManifest sees it', () => {
+    const f = scratch();
+    setClassifier({ provider: 'typesafe', keyEnv: 'TYPESAFE_API_KEY' }, f);
+    const m = readManifest(f);
+    assert.equal(m.classifier.provider, 'typesafe');
+    assert.equal(m.classifier.keyEnv, 'TYPESAFE_API_KEY');
+    assert.equal(classifierConfig(m).model, 'jev-latest');
+  });
+
+  // The comments in agent.yaml are half its documentation, so a write that
+  // round-tripped through the parser would be a regression.
+  test('every comment in the file survives', () => {
+    const f = scratch();
+    const before = readFileSync(f, 'utf8').split('\n').filter((l) => l.trim().startsWith('#'));
+    setClassifier({ provider: 'typesafe', keyEnv: 'TYPESAFE_API_KEY' }, f);
+    const after = readFileSync(f, 'utf8').split('\n').filter((l) => l.trim().startsWith('#'));
+    assert.deepEqual(after, before, 'a comment was dropped');
+  });
+
+  test('writing twice replaces, never stacks', () => {
+    const f = scratch();
+    setClassifier({ provider: 'typesafe', keyEnv: 'TYPESAFE_API_KEY' }, f);
+    setClassifier({ provider: 'typesafe', keyEnv: 'OTHER_KEY' }, f);
+    const text = readFileSync(f, 'utf8');
+    assert.equal(text.split('\n').filter((l) => /^\s{2}classifier:\s*$/.test(l)).length, 1);
+    assert.equal(readManifest(f).classifier.keyEnv, 'OTHER_KEY');
+  });
+
+  test('null removes it and routing goes back to the model', () => {
+    const f = scratch();
+    setClassifier({ provider: 'typesafe', keyEnv: 'TYPESAFE_API_KEY' }, f);
+    setClassifier(null, f);
+    assert.equal(readManifest(f).classifier, null);
+    assert.equal(classifierConfig(readManifest(f)), null);
+  });
+
+  // The whole routing block must still parse, or every run breaks.
+  test('the rest of routing is untouched', () => {
+    const f = scratch();
+    const before = readManifest(f);
+    setClassifier({ provider: 'typesafe', keyEnv: 'TYPESAFE_API_KEY' }, f);
+    const after = readManifest(f);
+    for (const k of ['entry', 'defaultAttempts', 'confidenceFloor', 'degradedFallback']) {
+      assert.deepEqual(after[k], before[k], `routing.${k} changed`);
     }
   });
 });

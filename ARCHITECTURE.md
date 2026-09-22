@@ -452,6 +452,19 @@ Because no prose is produced, `reason` is rendered from the distribution:
 `0`: `Number(null)` is a finite zero, and reading silence as zero confidence
 would bump *every* task up a tier.
 
+**Adding the key.** A chat provider proves its key with `listModels`; a System
+One model publishes no list, so `verifyKey()` asks the smallest real question
+instead — one two-option choice — and a 200 is the proof. `jr-arch key jev
+<key>` (aliases resolve through `classifierByName`) verifies first, then writes
+the key and `setClassifier()` writes the `routing.classifier` block. Both, in
+that order: a key saved without the block is a key nothing reads, and a block
+written against a key that does not work makes every run print the fallback
+notice, which reads as a broken tool rather than a rejected key. `setClassifier`
+is a line-based nested patcher for the usual reason — round-tripping
+`agent.yaml` through the parser would serialize away its comments — and it
+leaves the template's commented example in place, writing the live block after
+it.
+
 `fastSwarm()` answers the swarm question the same way — one `noul` per agent in
 a single request, keyed positionally (`a0`, `a1`) so a name cannot come back
 misspelled.

@@ -29,6 +29,7 @@
  */
 
 import { redact } from './provider.js';
+import { KeyRejected } from './providers.js';
 
 /**
  * The System One endpoints, kept as a table for the same reason `providers.js`
@@ -43,8 +44,19 @@ export const CLASSIFIERS = {
     keyEnv: 'TYPESAFE_API_KEY',
     defaultModel: 'jev-latest',
     signup: 'console.typesafe.ai/settings/keys',
+    // What someone types. People say "jev" — the model — far more often than
+    // "typesafe", the company, so both reach the same entry.
+    aliases: ['jev', 'typesafe.ai', 'systemone', 'system-one'],
   },
 };
+
+/** The registry id for whatever the user typed, or null. */
+export function classifierByName(name) {
+  const n = String(name ?? '').trim().toLowerCase();
+  if (!n) return null;
+  if (CLASSIFIERS[n]) return n;
+  return Object.keys(CLASSIFIERS).find((id) => CLASSIFIERS[id].aliases?.includes(n)) ?? null;
+}
 
 /**
  * Jev advertises 70–500ms. A classifier that is slower than the model it is
@@ -157,6 +169,70 @@ function num(v) {
   if (v === null || v === undefined || v === '') return null;
   const n = Number(v);
   return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : null;
+}
+
+// ---------------------------------------------------------------------------
+// Proving a key
+// ---------------------------------------------------------------------------
+
+/**
+ * Does this key work, and what does it reach?
+ *
+ * For a chat provider the key check is `listModels` — a wrong key is caught at
+ * setup rather than as a 401 on the first task. A System One model publishes no
+ * model list, so the equivalent is the smallest real question we can ask: one
+ * two-option choice over a scrap of state. It costs a fraction of a cent and
+ * proves the same thing, which is the point of checking at all.
+ *
+ * Throws `KeyRejected` for a key the provider refused, so callers can tell
+ * "wrong key" from "no network" and say something useful about each.
+ */
+export async function verifyKey({ provider = 'typesafe', key, baseUrl = null, fetchImpl = fetch, timeout = 10000 } = {}) {
+  const spec = CLASSIFIERS[provider];
+  if (!spec) throw new Error(`Unknown classifier provider "${provider}".`);
+  const config = {
+    provider,
+    label: spec.label,
+    model: spec.defaultModel,
+    keyEnv: spec.keyEnv,
+    baseUrl: String(baseUrl || spec.base).replace(/\/$/, ''),
+    path: spec.path,
+    signup: spec.signup,
+  };
+
+  // ask() reads the key from the environment, which is exactly what we are
+  // trying to avoid doing here: the key being checked has not been saved yet,
+  // and must not be written before it is known to work.
+  const control = new AbortController();
+  const timer = setTimeout(() => control.abort(), timeout);
+  let res;
+  try {
+    res = await fetchImpl(`${config.baseUrl}${config.path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model: config.model,
+        state: { check: 'connectivity' },
+        questions: { ok: { type: 'choice', options: ['yes', 'no'], description: 'Answer yes.' } },
+      }),
+      signal: control.signal,
+    });
+  } catch (err) {
+    throw new Error(redact(err?.message ?? String(err), key));
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (res.status === 401 || res.status === 403) {
+    throw new KeyRejected(`${config.label} rejected that key.`);
+  }
+  if (!res.ok) {
+    const text = redact(await res.text().catch(() => ''), key);
+    throw new Error(`${config.label} answered ${res.status}: ${text.slice(0, 200)}`);
+  }
+  // A 200 is the proof. The answer itself does not matter — we asked a
+  // question with no wrong answer precisely so it could not fail on content.
+  return { provider, label: config.label, model: config.model, keyEnv: config.keyEnv };
 }
 
 // ---------------------------------------------------------------------------

@@ -588,8 +588,17 @@ routing:
     api_key_env: TYPESAFE_API_KEY   # key from console.typesafe.ai/settings/keys
 ```
 
-Then `jr-arch key <your-jev-key>` stores it the same way as any other, and
-`jr-arch config show` names the destination.
+Or let jr-arch do both at once — paste the key and it verifies it, saves it to
+`.gitagent/.env`, and writes the block for you:
+
+```bash
+jr-arch key jev sk-...        # "typesafe" and "system-one" work too
+```
+
+It checks the key before saving anything: a key that does not work leaves your
+config exactly as it was, rather than switching routing on against a key that
+will fail on the first task. `jr-arch config show` then names the destination,
+and setup offers the same thing as an optional step.
 
 Two reasons to bother:
 

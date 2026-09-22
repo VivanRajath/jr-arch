@@ -415,6 +415,58 @@ function classifierOf(block) {
   };
 }
 
+/**
+ * Write `routing.classifier`, or remove it.
+ *
+ * A nested block, so neither `patchSection` (one scalar) nor `upsertSection`
+ * (a whole top-level block) fits. It is still line-based for the usual reason:
+ * round-tripping `agent.yaml` through the parser would serialize away every
+ * comment, and the comments in that file are half its documentation.
+ *
+ * The template ships this block commented out. A commented block is not a
+ * configured one, so it is left exactly where it is and the real block is
+ * written after it — someone who later comments ours out gets the explanation
+ * back, rather than a file that has lost it.
+ */
+export function setClassifier(spec, file = manifestPath()) {
+  const text = readFileSync(file, 'utf8');
+  const lines = text.split('\n');
+
+  const head = lines.findIndex((l) => /^routing:/.test(l));
+  if (head === -1) throw new Error('agent.yaml has no routing: block to put a classifier in.');
+
+  // The end of `routing:` — the first line back at column 0 that is not blank.
+  let end = head + 1;
+  while (end < lines.length && (lines[end].trim() === '' || /^[ \t]/.test(lines[end]))) end++;
+  while (end > head + 1 && lines[end - 1].trim() === '') end--;
+
+  // An existing ACTIVE block (not a commented one) is replaced in place.
+  let start = -1;
+  for (let i = head + 1; i < end; i++) {
+    if (/^\s{2}classifier:\s*$/.test(lines[i])) { start = i; break; }
+  }
+  let stop = start;
+  if (start !== -1) {
+    stop = start + 1;
+    while (stop < end && /^\s{4,}\S/.test(lines[stop])) stop++;
+  }
+
+  const body = spec === null ? [] : [
+    '  classifier:',
+    `    provider: ${spec.provider}`,
+    ...(spec.model ? [`    model: ${spec.model}`] : []),
+    `    api_key_env: ${spec.keyEnv}`,
+    ...(spec.baseUrl ? [`    base_url: ${spec.baseUrl}`] : []),
+  ];
+
+  const next = start !== -1
+    ? [...lines.slice(0, start), ...body, ...lines.slice(stop)]
+    : [...lines.slice(0, end), ...body, ...lines.slice(end)];
+
+  writeFileSync(file, next.join('\n'));
+  return spec !== null;
+}
+
 /** Every env var name the manifest references: base, per-tier, and saved keys. */
 export function keyEnvs(manifest) {
   const names = new Set();
