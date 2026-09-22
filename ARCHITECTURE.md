@@ -16,7 +16,7 @@ procedures, the decisions log and known gaps), see [RUNBOOK.md](RUNBOOK.md).
 3. [Layers and module map](#3-layers-and-module-map)
 4. [The `.gitagent/` data model](#4-the-gitagent-data-model)
 5. [Lifecycle of a task](#5-lifecycle-of-a-task)
-6. [Routing: the classifier](#6-routing-the-classifier)
+6. [Routing: the classifier](#6-routing-the-classifier) · [System One path](#61-the-system-one-path-classify-fastjs)
 7. [The ladder](#7-the-ladder)
 8. [One attempt: the agent loop](#8-one-attempt-the-agent-loop)
 9. [The tool surface](#9-the-tool-surface)
@@ -49,8 +49,9 @@ jr-arch is a Node CLI with **zero runtime dependencies**. It does two jobs:
    branch, and escalates or rolls back on failure.
 
 The user supplies the model and the key. The CLI makes no network calls of its
-own; the only outbound traffic goes to the configured provider and to explicit
-`git clone`s of packs.
+own; the only outbound traffic goes to the configured provider, to explicit
+`git clone`s of packs, and — only if the user adds a `routing.classifier`
+block — to the System One model that picks the entry agent (§6.1).
 
 ```
                ┌───────────────────── user's machine ──────────────────────┐
@@ -169,7 +170,8 @@ flowchart TD
 | `src/hooks.js` | 705 | Guardrail engine: loading and sealing, globbing, secret scanning, `checkEdit` / `checkCommand` / `checkRead` / `checkCommit` | `loadHooks`, `hookFiles`, `checkEdit`, `checkCommand`, `checkRead`, `checkCommit`, `globToRegExp`, `normalizePath`, `lineDelta` |
 | `src/session.js` | 424 | Harness-owned git, session directory, transcript (redacted), attempt frames, scoped diff/revert/commit, resume reading | `git`, `openSession`, `openAttempt`, `closeAttempt`, `revertAttempt`, `commitAttempt`, `attemptPaths`, `readSession`, `resumeBrief`, `record` |
 | `src/context.js` | 264 | Ledger (`newLedger`, `reconcile`), handoff compiler (`compile`), report prompt | `newLedger`, `reconcile`, `compile`, `REPORT_SYSTEM`, `reportPrompt` |
-| `src/classify.js` | 173 | Picks the entry agent: pinned → red build → one model call → floor bump / fallback | `classify` |
+| `src/classify.js` | ~200 | Picks the entry agent: pinned → red build → System One (if configured) → one model call → floor bump / fallback | `classify` |
+| `src/classify-fast.js` | ~250 | Optional System One classifier (TypeSafe Jev): typed choice/noul questions, calibrated probability, no prose. Opt-in, and returns null on any failure so the model classifier runs | `CLASSIFIERS`, `classifierConfig`, `ask`, `answerFor`, `stateFor`, `fastClassify`, `fastSwarm` |
 | `src/agents.js` | 240 | Reads agents from front matter; escalation, cycles, build fixer, scope ownership, partition, swarm grouping, disjointness | `readAgents`, `frontMatter`, `findAgent`, `escalatesTo`, `escalationCycle`, `buildFixer`, `ownsPath`, `partition`, `swarmable`, `disjoint` |
 | `src/verify.js` | 139 | Detects and runs the project's build/test; Windows `.cmd` shim handling; head+tail output truncation | `detect`, `verify`, `resolveBin`, `winCmd`, `tail` |
 | `src/provider.js` | 601 | Provider-neutral transcript ↔ Anthropic/OpenAI wire; `request()` with limit recovery; SSE parsing; key redaction; JSON extraction | `callModel`, `ProviderError`, `parseProviderError`, `parseSSE`, `readAnthropicStream`, `readOpenAIStream`, `extractJson`, `redact`, `apiKey`, `requiresKey`, `missingKey` |
@@ -383,6 +385,11 @@ at the first match:
 └──────────────┬───────────────┘
                no
 ┌──────────────▼───────────────┐
+│ routing.classifier set?      │──yes─▶ one System One call (choice over the
+│ (opt-in, see below)          │         installed agents) → calibrated p
+└──────────────┬───────────────┘         source: system-one
+               no, or it declined
+┌──────────────▼───────────────┐
 │ one model call               │  system: SYSTEM + tier names + DUTIES.md
 │ temp 0, 256 tokens           │  user:   task + build state + ≤300 repo files
 └──────────────┬───────────────┘
@@ -403,7 +410,51 @@ at the first match:
   each agent's own declaration (role, priority, scope, who it escalates to), so
   routing does not depend on a file the user may have deleted.
 - The low-confidence bump only moves the task *up*: sending it to too senior an
-  agent costs tokens, while sending it too low causes thrash.
+  agent costs tokens, while sending it too low causes thrash. Both classifier
+  paths go through one `withFloor()`, so the rule cannot drift between them.
+
+### 6.1 The System One path (`classify-fast.js`)
+
+A *System One* model takes structured state plus typed questions and returns
+typed answers carrying a calibrated probability. It generates no text. Tier
+selection is exactly that shape, so when `routing.classifier` is set it is
+asked first.
+
+```
+state     { task, build, file_count, files[≤300],
+            agents[{name, role, priority, owns, repairs_build,
+                    terminal, escalates_to}],
+            entry_rules }                       ← DUTIES.md, ≤4000 chars
+questions { tier: { type: "choice", options: readAgents().map(name) } }
+           │
+           ▼  POST {base}/systemone, Bearer {api_key_env}, 4s timeout
+answer    { choice, confidence, probabilities }  → answerFor()
+```
+
+Design constraints, each of which has a test:
+
+| Constraint | Why |
+|---|---|
+| **Not in `providers.js`** | That registry is chat models. Onboarding, `listModels` and `modelFor` all read it, and would offer a model with no tool calling that `doctor` would rightly fail |
+| **Opt-in, absent by default** | It is a second destination for the task text and file list. `config show` names it, set or unset |
+| **Always allowed to decline** | Missing key, 401, timeout, or an envelope `answerFor` does not recognise → `null` → the model classifier runs. A beta API must not decide whether routing works at all |
+| **Options come from `readAgents()`** | No default agent name reaches the code, and an option outside the set we supplied is refused |
+| **Never enforces** | Guards, checkpoints, `disjoint()` and build state stay deterministic. `test/classify-fast.test.js` asserts `hooks.js`, `tools.js`, `verify.js` and `session.js` do not import it |
+
+`answerFor()` is deliberately tolerant about the response envelope (`answers` /
+`questions` / `results` / bare) and the value key (`choice` / `value` /
+`answer` / `noul` / `score`), because the raw JSON shape is not pinned by the
+published docs. Anything it cannot read becomes `null`, never a guess — pulling
+a tier name out of an assumed shape is worse than falling back.
+
+Because no prose is produced, `reason` is rendered from the distribution:
+`junior-dev 0.71 · ui-editor 0.22`. A missing `confidence` is read as `1`, not
+`0`: `Number(null)` is a finite zero, and reading silence as zero confidence
+would bump *every* task up a tier.
+
+`fastSwarm()` answers the swarm question the same way — one `noul` per agent in
+a single request, keyed positionally (`a0`, `a1`) so a name cannot come back
+misspelled.
 
 ---
 
@@ -817,8 +868,9 @@ general, so anything it can't prove disjoint counts as overlapping.
 ### Selecting and running
 
 `swarmFor(ctx, {task, files})` takes the **first** group with more than one
-member and asks the model which of them the task actually spans
-(`selectSwarm` in `classify.js`, one small call). One name means it is not
+member and asks which of them the task actually spans (`selectSwarm` in
+`classify.js`, one small call — or, when `routing.classifier` is set, one
+`fastSwarm` request carrying a `noul` per agent). One name means it is not
 swarm work, and the ladder runs instead. If the selection call fails or returns
 nothing usable, it falls back to file ownership: `partition()` assigns repo
 files to their highest-priority owner and the agents that claim any are used.
@@ -1096,6 +1148,9 @@ flowchart LR
     a key ever displayed.
   - `.env*` is in the sealed `protected-read` list, so the model can't read it
     with either tool.
+  - `keyEnvs()` includes `routing.classifier.api_key_env`, so a System One key
+    lives in `.gitagent/.env` under the same rules as every other key: a name
+    in the manifest, never a value.
   - `requiresKey()` is false for Ollama and for any `base_url` on this machine
     (localhost, 127.x, ::1, host.docker.internal): a local server authenticates
     nothing, and treating it as unconfigured sent the user through onboarding
@@ -1367,6 +1422,8 @@ here: `overridable: no` must parse as `false`, not as a truthy string.
 │   │   handoff reports → claims; engine stamps provenance              │   │
 │   │   packs           → confine, refuse model:, report before copy    │   │
 │   │   provider errors → parsed, tidied, redacted                      │   │
+│   │   System One     → answerFor tolerant, null on anything else;     │   │
+│   │   answers          an option outside the supplied set is refused  │   │
 │   └───────────────────────────────────────────────────────────────────┘   │
 │                                                                           │
 │ SECRETS: process.env ← shell | .gitagent/.env (0600, gitignored first)    │
@@ -1379,6 +1436,11 @@ Controls that hold even when `hooks.yaml` is empty or deleted:
 `secret-scan`, `no-force-push`, `protected-read`, `no-sudo`; path confinement in
 `inside()`; no-shell execution; checkpoint default-deny when non-interactive;
 pack `model:` refusal.
+
+None of these may be decided probabilistically. A configured System One model
+chooses *which agent works on a task* and nothing else — a guardrail that fires
+at p=0.87 is a guardrail nobody can trust — and the enforcement modules are
+tested to have no import path to it.
 
 ---
 

@@ -1,8 +1,0 @@
-# Environment config.
-#
-# Git and routing settings live in agent.yaml, which is the file the tool
-# reads. This one carries the telemetry claim, so it is visible and checkable
-# in your own repository.
-
-telemetry:
-  enabled: false               # this tool sends nothing, anywhere

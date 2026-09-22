@@ -38,8 +38,8 @@ decision-log entry in [§6](#6-decisions-log) that explains why.
 - [ ] **Zero runtime dependencies.** No new entries under `dependencies`. No
       argv-parsing library, no YAML library.
 - [ ] **No telemetry.** The CLI never initiates network traffic other than the
-      user's provider and an explicit `git clone`. No version checks, no crash
-      reporting.
+      user's provider, a `routing.classifier` the user configured themselves,
+      and an explicit `git clone`. No version checks, no crash reporting.
 - [ ] **No default agent name in executable routing code.** `build-doctor`,
       `junior-dev`, `senior-dev` and `ui-editor` exist only in `templates/`.
       `test/custom-agents.test.js` must keep passing.
@@ -135,7 +135,8 @@ exercise that path:
 
 Read these in order. Each builds on the one before.
 
-1. `CLAUDE.md`: the decisions, in the author's words.
+1. `ARCHITECTURE.md` §2 and this file's §6: the decisions and why they hold.
+   (`CLAUDE.md` carries the author's own wording but is untracked — local only.)
 2. `bin/jr-arch.js`: every entry point, in about 150 lines.
 3. `templates/`: what a user actually gets: `agent.yaml`, `DUTIES.md`,
    `hooks/hooks.yaml`, one `agents/*/SOUL.md`.
@@ -147,8 +148,10 @@ Read these in order. Each builds on the one before.
 8. `src/session.js`: branches, frames, revert, commit.
 9. `src/context.js`: the ledger and `compile()`.
 10. `src/provider.js`: `callModel()` and `request()`.
-11. `src/chat.js` → `src/onboard.js` → `src/generate.js`: the front door.
-12. `src/pack.js` → `src/pull.js`: distribution.
+11. `src/classify.js` → `src/classify-fast.js`: routing, and the optional
+    System One path that may always decline.
+12. `src/chat.js` → `src/onboard.js` → `src/generate.js`: the front door.
+13. `src/pack.js` → `src/pull.js`: distribution.
 
 ---
 
@@ -255,6 +258,11 @@ SSE bytes to `parseSSE` + `readAnthropicStream` / `readOpenAIStream`
    `run()`.
 
 ### 5.3 Add a provider
+
+A *chat* provider goes in `PROVIDERS`. A **System One** classifier does not —
+it goes in `CLASSIFIERS` in `src/classify-fast.js`, because everything reading
+`PROVIDERS` is choosing a model to run an agent with, and a System One model
+has no tool calling. See §5.13.
 
 1. Add an entry to `PROVIDERS` in `src/providers.js`: `label`, `wire`
    (`anthropic` | `openai`), `base`, `keyEnv`, `keyPattern`, `signup`, and
@@ -438,7 +446,30 @@ key:
 7. Try `--swarm` with two scoped parallel agents.
 8. Try `/prompt` end to end.
 9. For each run, read `transcript.jsonl`, the diffs and `summary.md`. Record
-   what happened in `CLAUDE.md` Status, and add a test for anything that broke.
+   what happened in `ARCHITECTURE.md` and add a test for anything that broke.
+10. If a System One classifier is configured, confirm the **real** response
+    envelope against `answerFor()` — it is tolerant by design because the raw
+    JSON shape was never verified against a live key. Tighten it once it is,
+    and keep the `null` fallback.
+
+### 5.13 Add a System One classifier provider
+
+A System One model answers typed questions with calibrated probabilities and
+generates no text, so it can pick an agent but can never run one.
+
+1. Add an entry to `CLASSIFIERS` in `src/classify-fast.js`: `label`, `base`,
+   `path`, `keyEnv`, `defaultModel`, `signup`. **Not** `PROVIDERS` — see §5.3.
+2. If its wire shape differs, extend `ask()` for the request and `answerFor()`
+   for the response. Keep `answerFor` returning `null` for anything it cannot
+   read; a guess is worse than a fallback.
+3. Nothing else should need touching: `classifierConfig()` resolves through the
+   table, `keyEnvs()` already picks the key up, and `config show` already names
+   the destination.
+4. Tests, in `test/classify-fast.test.js`: the request shape, a good answer, a
+   missing confidence, an option outside the supplied set, and every failure
+   mode returning `null`.
+5. Do **not** wire it into anything that enforces. The import test at the
+   bottom of that file exists to catch it.
 
 ---
 
@@ -452,7 +483,7 @@ which test pins it. Reverse one only with a new entry here that explains why.
 | Decision | Why | Enforced in | Pinned by |
 |---|---|---|---|
 | **Zero runtime dependencies**, hand-rolled argv parsing | `npx` speed is a feature; "audit it yourself" loses credibility with a transitive dependency tree | `package.json`, `bin/jr-arch.js` | — |
-| **No telemetry, ever** | The privacy claim is the product. `config/default.yaml` states `telemetry: enabled: false` so users can check it | absence of network code outside `provider.js`, `providers.js`, `pack.js` | — |
+| **No telemetry, ever** | The privacy claim is the product. `config/default.yaml` states `telemetry: enabled: false` so users can check it | absence of network code outside `provider.js`, `providers.js`, `pack.js`, `classify-fast.js` | — |
 | **The four tiers are a default pack, not the product** | Users install arbitrary agents; nothing may assume a set, count or ladder. Zero agents is an error, never a fallback | `readAgents()`, `run()` zero-agent throw | `custom-agents.test.js` |
 | **No default agent name in executable code** | Every routing decision is declared by the agent itself | `agents.js`, `classify.js`, `run.js` | `custom-agents.test.js` (agents named medic / scout / archivist) |
 | **An agent describes itself** (front matter) | Installing is copying a folder; no registry to keep in sync | `readAgents()` | `agents.test.js` |
@@ -547,6 +578,10 @@ which test pins it. Reverse one only with a new entry here that explains why.
 | **Model ids are never hard-coded** (except `init --provider` defaults) | A list is stale the week it ships and offers models the key can't use | `providers.js` | — |
 | **Non-chat models are filtered** | Speech, embedding and moderation models can't call tools | `isChatModel()` | `providers.test.js` |
 | **A key only ever goes to its own provider** | Groq keys used to be sent to `api.openai.com` | `endpoint()`, `baseUrlFor()` | `providers.test.js` |
+| **A System One classifier is not in `PROVIDERS`** | That table is chat models; onboarding, `listModels` and `modelFor` would offer a model with no tool calling that `doctor` would fail | `CLASSIFIERS` in `classify-fast.js` | `classify-fast.test.js` |
+| **The classifier is opt-in and always allowed to decline** | It is a second destination for the task text and file list, and a beta API must not decide whether routing works at all | `classifierConfig()`, every `catch` returning `null` | `classify-fast.test.js` |
+| **The classifier never enforces** | A guardrail that fires at p=0.87 is one nobody can trust | no import from `hooks`/`tools`/`verify`/`session` | `classify-fast.test.js` |
+| **Both classifier paths share one floor** | A second copy of the bump is a second place for it to stop happening | `withFloor()` in `classify.js` | `classify-fast.test.js` |
 | **Keys never land in `agent.yaml`** | The privacy pitch fails the first time a user commits a key | `api_key_env` naming | `config.test.js`, `phase1.test.js` |
 | **The shell beats the file** | A deliberate export mustn't be overridden by an old file | `loadEnv()` | `env.test.js` |
 | **`ensureIgnored` runs before the write** | A key on disk is only acceptable while the file is ignored | `key()`, `onboard`, `chat /key`, `assignModels` | `env.test.js` |
@@ -722,6 +757,8 @@ Commit-by-commit, with what changed and why. All dates are 2026.
 | 09-19 | `a3c037b` | **feat**: keys you can see and edit in the folder, picked up as you go | `envTemplate` placeholders, in-place `writeKey`, `reloadEnv` before every message, `discoverKeys`, `/keys`, rescue of a key pasted into `agent.yaml` |
 | 09-19 | `89db1ea` | **feat**: recognise Google Gemini keys | `gemini` provider (`AIza`, `GEMINI_API_KEY`) on Google's OpenAI-compatible endpoint; `models/` prefix, 400 bad-key, array-wrapped errors, `quotaId` daily limits, "retry in", unindexed stream tool calls |
 | 09-19 | `72e3319` | **chore**: 0.1.10 | — |
+| 09-23 | `aec762f` | **feat**: optional System One classifier for tier selection | `routing.classifier` → `classify-fast.js`; a calibrated probability makes `classifier_confidence_floor` mean what it says, and routing stops costing a generation. Opt-in, always allowed to decline, never enforces. `withFloor()` shared by both paths; `num()` read a missing confidence as 0 because `Number(null)` is finite |
+| 09-23 | `4028882` | **chore**: untrack `CLAUDE.md` | design notes stay on disk, out of the repo; not in `package.json` "files", so the tarball is unchanged |
 
 ---
 

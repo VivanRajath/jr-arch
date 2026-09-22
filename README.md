@@ -571,6 +571,47 @@ model. Model choice stays in your own `agent.yaml`. A pack whose
 When an agent runs out of attempts, the task moves to its `escalates_to`, or to
 the next agent by priority. A `terminal` agent stops and reports to you instead.
 
+#### Routing with a System One model (optional)
+
+Step 4 is a closed question — one agent out of the installed set — which is
+what a *System One* model answers natively. [TypeSafe's
+Jev](https://typesafe.ai/) takes structured state and typed questions and
+returns a typed answer with a **calibrated** probability, in 70-500ms, and
+generates no text at all.
+
+Point routing at one by adding a `classifier` block to `agent.yaml`:
+
+```yaml
+routing:
+  classifier:
+    provider: typesafe
+    api_key_env: TYPESAFE_API_KEY   # key from console.typesafe.ai/settings/keys
+```
+
+Then `jr-arch key <your-jev-key>` stores it the same way as any other, and
+`jr-arch config show` names the destination.
+
+Two reasons to bother:
+
+- **The confidence becomes meaningful.** `classifier_confidence_floor` decides
+  when a task is bumped a tier up. Asked of a chat model, that number is the
+  model grading its own answer, and models are systematically overconfident. A
+  calibrated probability makes the floor mean what it says.
+- **Routing stops costing a generation.** Picking an agent is no longer a full
+  model call on your main key.
+
+It is **off by default and always optional**. Switching it on sends the task
+text and the repository's file list to a second provider, so it is yours to
+turn on. If the key is missing, the call fails, it times out, or the reply is
+a shape jr-arch does not recognise, the normal model classifier runs instead —
+a task is never blocked by it. Because it writes no prose, the `reason` you see
+is the distribution: `junior-dev 0.71 · ui-editor 0.22`.
+
+It only ever **chooses an agent**. Guardrails, human checkpoints, scope
+overlap and build state stay deterministic, and a test asserts the enforcement
+path cannot import it. A guard that fires at p=0.87 is a guard nobody can
+trust.
+
 ### Swarms
 
 Agents that opt in with `parallel: true` and have **non-overlapping** `owns`
@@ -583,6 +624,10 @@ jr-arch run "update the api and its tests" --swarm
 They share the same context record. If one fails, only *its* files are rolled
 back and the others' work stays. Swarms are opt-in because fanning out
 multiplies your token bill.
+
+Which agents a task actually needs is asked the same way the entry agent is,
+so a configured System One classifier answers it too — one yes/no per agent in
+a single request, instead of a model call that has to name them in free text.
 
 ---
 
@@ -777,6 +822,9 @@ routing:
   context_budget: 6000         # characters of compiled handoff brief
   classifier_confidence_floor: 0.6
   # degraded_fallback: <agent> # where an unclassifiable task goes (default: last by priority)
+  # classifier:                # optional System One model for picking the agent.
+  #   provider: typesafe       # Off by default; falls back to the model above.
+  #   api_key_env: TYPESAFE_API_KEY
 
 git:                            # how a run uses git
   session_branch: true         # false: work on the current branch
@@ -797,6 +845,7 @@ file's comments intact.
 | Variable | Effect |
 |---|---|
 | the one named by `api_key_env` | the provider key. The shell wins over `.gitagent/.env` |
+| the one named by `routing.classifier.api_key_env` | the System One classifier key, if you configured one |
 | `NO_COLOR` | disable ANSI colour |
 
 ---
@@ -848,6 +897,12 @@ jr-arch sends nothing on its own: no telemetry, no analytics, no crash reports,
 no update checks. The only network traffic goes to the AI provider you
 configured, plus any `add-agent`, `add-guard`, `init --from`, or `pull` you run
 yourself (a `git clone`).
+
+If you set `routing.classifier`, that is a **second** destination: the task
+text and the repository's file list go to it so it can pick an agent. It is
+off unless you add the block yourself, and `jr-arch config show` always names
+where routing is sent, set or unset. Nothing else changes — your code and
+diffs still only ever reach the model provider you configured.
 
 ## Format
 

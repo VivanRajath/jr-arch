@@ -1,8 +1,9 @@
 node_modules/
 
 # jr-arch
-.gitagent/.env
-.gitagent/.session/
+# The scaffold this repo carries for running the tool on itself. It is a
+# user's working copy, not source: templates/ is what ships.
+.gitagent/
 
 # Local design notes, not shipped and not tracked
 CLAUDE.md
