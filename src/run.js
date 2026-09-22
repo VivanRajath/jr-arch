@@ -126,6 +126,11 @@ export async function run(positional, flags, { call = callModel, prompter = null
     agents,
     dir,
     call,
+    // A configured classifier that quietly never runs looks exactly like one
+    // that works. Say so: the fallback is correct behaviour, but believing a
+    // System One model is routing when it is not is how someone tunes a
+    // confidence floor against a number that was never calibrated.
+    onNotice: warn,
   });
   if (flags.quiet) {
     info(`${c.c(entry.tier)} ${c.d(entry.source === 'explicit' ? '' : `· ${entry.reason}`)}`);

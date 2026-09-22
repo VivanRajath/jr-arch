@@ -7,3 +7,7 @@ node_modules/
 
 # Local design notes, not shipped and not tracked
 CLAUDE.md
+
+# jr-arch
+.gitagent/.env
+.gitagent/.session/
