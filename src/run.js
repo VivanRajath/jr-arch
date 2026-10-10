@@ -403,30 +403,65 @@ export function escalate(name, agents) {
  * shared mutable thing, and two agents staging at once produce a diff that
  * belongs to neither of them.
  */
+/**
+ * A hard ceiling on waves, independent of attempts and escalation.
+ *
+ * Attempt budgets and the refusal to escalate into an exhausted agent already
+ * bound this, but they are bounded by what AGENTS declare — and a hand-written
+ * set of agents is exactly where a surprise comes from. This is the backstop
+ * that is not the user's to get wrong.
+ */
+const MAX_WAVES = 12;
+
 export async function swarm(ctx, group, { task, brief }) {
-  console.log(c.b(`▸ swarm`) + c.d(`  ${group.map((a) => a.name).join(' ∥ ')}`));
+  const attemptsFor = (name) =>
+    findAgent(name, ctx.agents)?.attempts ?? ctx.manifest.defaultAttempts ?? 2;
 
-  const settled = await Promise.all(group.map(async (agent) => {
-    const tierModel = modelFor(ctx.manifest, agent.name);
-    const frame = await gitLock(ctx, () =>
-      openAttempt(ctx.session, { tier: agent.name, task: brief, owns: agent.owns }));
-    try {
-      const result = await attempt({ ...ctx, tierModel, agent }, frame, brief);
-      return { agent, frame, result, tierModel };
-    } catch (e) {
-      return { agent, frame, tierModel, result: { kind: 'failed', reason: e.message } };
-    }
-  }));
-
+  const used = {};
   const done = [];
   const failed = [];
+  // Agents still owed a turn, each with the brief it should start from. The
+  // first wave starts from the task; every later one from the ledger.
+  let queue = group.map((agent) => ({ agent, brief, reason: null }));
 
-  for (const { agent, frame, result, tierModel } of settled) {
-    if (result.kind === 'done') {
-      await gitLock(ctx, () => closeAttempt(ctx.session, frame, { status: 'done' }));
-      ok(`${c.c(agent.name)} ${result.summary || 'done'}`);
-      done.push({ agent, frame, result });
-    } else {
+  for (let wave = 1; queue.length && wave <= MAX_WAVES; wave++) {
+    // Only a provably disjoint subset may run together, and that has to be
+    // re-decided every wave: the original group was checked by swarmable(),
+    // but an escalation target was never part of that check. A senior agent
+    // with no declared scope claims everything, so running it beside a sibling
+    // would put two writers in one tree — the one thing scope exists to stop.
+    const groups = swarmable(queue.map((q) => q.agent));
+    const running = queue.filter((q) => groups[0].includes(q.agent));
+    const deferred = queue.filter((q) => !groups[0].includes(q.agent));
+
+    const label = running.map((q) => q.agent.name).join(' ∥ ');
+    console.log(
+      c.b(`▸ swarm`) + c.d(`  wave ${wave}  ${label}`) +
+      (deferred.length ? c.d(`  (${deferred.length} waiting — scope overlap)`) : ''),
+    );
+
+    const settled = await Promise.all(running.map(async ({ agent, brief: own, reason }) => {
+      used[agent.name] = (used[agent.name] ?? 0) + 1;
+      const tierModel = modelFor(ctx.manifest, agent.name);
+      const frame = await gitLock(ctx, () =>
+        openAttempt(ctx.session, { tier: agent.name, task: own, reason, owns: agent.owns }));
+      try {
+        const result = await attempt({ ...ctx, tierModel, agent }, frame, own);
+        return { agent, frame, result, tierModel };
+      } catch (e) {
+        return { agent, frame, tierModel, result: { kind: 'failed', reason: e.message } };
+      }
+    }));
+
+    const next = [];
+    for (const { agent, frame, result, tierModel } of settled) {
+      if (result.kind === 'done') {
+        await gitLock(ctx, () => closeAttempt(ctx.session, frame, { status: 'done' }));
+        ok(`${c.c(agent.name)} ${result.summary || 'done'}`);
+        done.push({ agent, frame, result });
+        continue;
+      }
+
       await gitLock(ctx, async () => {
         closeAttempt(ctx.session, frame, { status: result.kind, reason: result.reason });
         // Same rule as the ladder: do not ask a provider that just refused for
@@ -438,15 +473,93 @@ export async function swarm(ctx, group, { task, brief }) {
         // owned, and a whole-tree reset would throw their work away too.
         revertAttempt(ctx.session, frame);
       });
-      warn(`${agent.name}: ${result.reason ?? 'failed'} — its files were rolled back`);
-      failed.push({ agent, frame, result });
+
+      // A fatal provider error ends this agent, exactly as on the ladder:
+      // another call to the provider that just refused buys nothing, and a
+      // successor on the same key would be refused the same way.
+      if (result.kind === 'fatal') {
+        warn(`${agent.name}: ${result.reason ?? 'failed'} — its files were rolled back`);
+        failed.push({ agent, frame, result });
+        continue;
+      }
+
+      const step = nextTurn(ctx, { agent, result, used, attemptsFor });
+      if (!step) {
+        warn(`${agent.name}: ${result.reason ?? 'failed'} — its files were rolled back`);
+        failed.push({ agent, frame, result });
+        continue;
+      }
+
+      // This is the shared-state half of a swarm doing real work. The brief is
+      // compiled from the ledger, which by now holds every sibling's recorded
+      // decisions, files and ruled-out approaches — so a retry does not repeat
+      // what another agent already proved does not work.
+      next.push({
+        agent: step.agent,
+        reason: step.reason,
+        brief: compile(ctx.ledger, { to: step.agent.name, reason: step.reason, budget: ctx.contextBudget }),
+      });
+      warn(step.handoff
+        ? `${agent.name} → ${step.agent.name}: ${result.reason ?? 'failed'}`
+        : `${agent.name}: ${result.reason ?? 'failed'} — retrying (${used[agent.name]}/${attemptsFor(agent.name)})`);
     }
+
+    // Deferred agents keep their brief; a requeued one may already be waiting,
+    // and running the same agent twice in one wave is two writers again.
+    queue = merge([...deferred, ...next]);
   }
 
-  // Verify once, after the whole group. Running it per agent would race on the
-  // same build directory and report each agent the others' failures.
+  if (queue.length) {
+    warn(`swarm stopped after ${MAX_WAVES} waves with ${queue.length} agent(s) still queued`);
+    for (const q of queue) failed.push({ agent: q.agent, frame: null, result: { kind: 'failed', reason: `not reached within ${MAX_WAVES} waves` } });
+  }
+
+  // Verify once, after every wave. Running it per agent would race on the same
+  // build directory and report each agent the others' failures.
   const build = verify({ root: ctx.root });
   return { done, failed, build };
+}
+
+/**
+ * What happens to an agent that did not finish: another try, a successor, or
+ * nothing.
+ *
+ * The same two rules the ladder follows. An agent gets as many attempts as it
+ * declares, and escalation goes where IT says — never to an agent that has
+ * already spent its own budget, which is what turned two agents naming each
+ * other into a task passed round forever.
+ */
+function nextTurn(ctx, { agent, result, used, attemptsFor }) {
+  // An explicit handoff is the agent's own decision and is honoured first.
+  const asked = result.kind === 'handoff' && result.to ? findAgent(result.to, ctx.agents) : null;
+  if (asked && (used[asked.name] ?? 0) < attemptsFor(asked.name)) {
+    return { agent: asked, reason: result.reason, handoff: true };
+  }
+
+  if ((used[agent.name] ?? 0) < attemptsFor(agent.name)) {
+    return { agent, reason: result.reason, handoff: false };
+  }
+
+  const up = escalatesTo(agent, ctx.agents);
+  const heir = up ? findAgent(up, ctx.agents) : null;
+  if (heir && (used[heir.name] ?? 0) < attemptsFor(heir.name)) {
+    return { agent: heir, reason: result.reason, handoff: true };
+  }
+  return null;
+}
+
+/** One turn per agent. Two siblings escalating to the same heir queue it once. */
+function merge(turns) {
+  const out = [];
+  for (const turn of turns) {
+    const seen = out.find((t) => t.agent.name === turn.agent.name);
+    if (!seen) { out.push(turn); continue; }
+    // Both reasons matter to whoever inherits the work.
+    if (turn.reason && seen.reason !== turn.reason) {
+      seen.reason = [seen.reason, turn.reason].filter(Boolean).join('; also: ');
+    }
+  }
+  return out;
 }
 
 /**
