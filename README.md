@@ -639,6 +639,30 @@ They share the same context record. If one fails, only *its* files are rolled
 back and the others' work stays. Swarms are opt-in because fanning out
 multiplies your token bill.
 
+A swarm runs in **waves**. Each wave runs the agents whose scopes are provably
+disjoint; anything that overlaps waits for the next one. An agent that does not
+finish gets the `attempts` it declares, then hands to its `escalates_to` — the
+same rules the single-agent ladder follows. The agent that picks the work up
+is briefed from the shared record, so it can read what its siblings decided,
+which files they touched and which approaches already failed, instead of
+starting again from the bare task.
+
+```
+wave 1   api-dev ∥ ui-dev
+           │         └─ done
+           └─ failed → retry
+
+wave 2   api-dev            (now reading ui-dev's record)
+           └─ failed → escalates_to
+
+wave 3   senior-dev         (no declared scope — runs alone)
+           └─ done
+```
+
+An agent with no declared scope claims the whole tree, so it never runs beside
+another agent. That is the rule that makes concurrent writes safe, and it is
+re-checked every wave rather than once at the start.
+
 Which agents a task actually needs is asked the same way the entry agent is,
 so a configured System One classifier answers it too — one yes/no per agent in
 a single request, instead of a model call that has to name them in free text.

@@ -885,7 +885,7 @@ From `CLAUDE.md` "Next", plus the gaps above that most need fixing.
 | 2 | Gemini against the live API | Built from Google's documented shapes and tested only with a fake `fetch`. A real key should run a task and hit a rate limit once, to confirm the error parsing and the unindexed tool calls |
 | 3 | Bring `gitagent-default` to the current format | Front-matter routing; remove root SOUL/RULES |
 | 4 | `routing.entry` still names one agent | |
-| 5 | Swarm still does not escalate | Ladder and swarm remain two paths through `run()`; selection is now task-aware but a failed swarm agent has nowhere to go |
+| ~~5~~ | ~~Swarm still does not escalate~~ | **Done.** `swarm()` runs in waves: a failed agent retries to its declared `attempts`, then escalates to its `escalates_to`, and the heir is briefed from the shared ledger. Disjointness is replanned every wave, so an unscoped heir runs alone. `test/swarm-waves.test.js` |
 | 6 | `doctor` probes only the default key | Iterate `keyEnvs()` / `modelFor` per agent |
 | 7 | Token accounting per agent and per model | The budget work estimates what a request *will* cost and `limits` reports the allowance; nothing yet records what a finished run actually spent |
 | 7b | A fallback provider chain | `model.fallback:` used on a too-large or rate-limit error. Per-agent models already cover this by hand (see README "Working under a small limit"); a chain would automate it, and must stay explicit config because it decides where code is sent |

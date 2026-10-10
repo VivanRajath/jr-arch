@@ -885,30 +885,54 @@ general, so anything it can't prove disjoint counts as overlapping.
 
 ### Selecting and running
 
-`swarmFor(ctx, {task, files})` takes the **first** group with more than one
-member and asks which of them the task actually spans (`selectSwarm` in
-`classify.js`, one small call — or, when `routing.classifier` is set, one
-`fastSwarm` request carrying a `noul` per agent). One name means it is not
-swarm work, and the ladder runs instead. If the selection call fails or returns
-nothing usable, it falls back to file ownership: `partition()` assigns repo
-files to their highest-priority owner and the agents that claim any are used.
-That fallback answers a different question — "does this agent own anything in
-this repo" — which is why it is no longer the primary path.
+`swarmFor(ctx, {task, files})` takes **every** agent that opted into `parallel`
+and declared a scope, and asks which of them the task actually spans
+(`selectSwarm` in `classify.js`, one small call — or, when `routing.classifier`
+is set, one `fastSwarm` request carrying a `noul` per agent). One name means it
+is not swarm work, and the ladder runs instead. If the selection call fails or
+returns nothing usable, it falls back to file ownership: `partition()` assigns
+repo files to their highest-priority owner and the agents that claim any are
+used. That fallback answers a different question — "does this agent own
+anything in this repo" — which is why it is no longer the primary path.
 
-`swarm(ctx, group)`:
-- Every agent runs `attempt()` concurrently through `Promise.all`.
-- `openAttempt`, `closeAttempt`, `record` and `revertAttempt` go through
-  `gitLock(ctx)`, a promise chain on `ctx.gitQueue`.
-- A failed agent's report is reconciled into the **shared ledger** and only its
-  own paths are reverted.
-- `verify()` runs **once**, after all agents finish. A red build goes to the
-  `fixes_build` agent first, exactly as on the ladder; each successful frame
-  then carries that build result into `checkCommit`, so a swarm cannot commit
-  over a red build.
-- Outcome: some succeeded → `done`, or `partial` if any failed. Each successful
-  frame is then committed. None succeeded → `stopped`.
+It used to take `swarmable(ctx.agents)[0]`, the first provably disjoint group,
+so an agent that landed in a second group could never swarm however squarely
+the task sat in its scope. Who may run *simultaneously* is no longer decided
+here, because `swarm()` replans it every wave.
 
-Swarm has no escalation path of its own (RUNBOOK "Next" item).
+### Waves
+
+`swarm(ctx, group)` is a loop, not one shot. Each pass:
+
+1. **Plan the wave.** `swarmable()` over the queue; the first group runs
+   concurrently, everything else waits. This is re-decided *every* wave, not
+   once — the original group was checked for disjointness, but an escalation
+   target never was, and an agent with no declared scope claims the whole tree.
+   An heir like that runs alone.
+2. **Run it.** `attempt()` concurrently through `Promise.all`. `openAttempt`,
+   `closeAttempt`, `record` and `revertAttempt` go through `gitLock(ctx)`, a
+   promise chain on `ctx.gitQueue`.
+3. **Settle each result.** Done → closed and kept. Otherwise closed, reconciled
+   into the **shared ledger**, and only its own paths reverted.
+4. **Decide the next turn** (`nextTurn`): an explicit `handoff` target first,
+   then another attempt if the agent's own `attempts` allows, then
+   `escalates_to`. Never into an agent that has already spent its budget —
+   the same rule that stops the ladder passing a task round forever.
+5. **Re-brief.** A retry or heir gets `compile(ctx.ledger, …)`, so it reads
+   every sibling's recorded decisions, files and ruled-out approaches rather
+   than the bare task. This is the shared-state half doing real work.
+
+`merge()` keeps one turn per agent, so two siblings escalating to the same heir
+queue it once and both reasons travel. `MAX_WAVES` (12) is a backstop that does
+not depend on what agents declare.
+
+`verify()` runs **once**, after every wave. A red build goes to the
+`fixes_build` agent first, exactly as on the ladder; each successful frame then
+carries that build result into `checkCommit`, so a swarm cannot commit over a
+red build.
+
+Outcome: some succeeded → `done`, or `partial` if any failed. Each successful
+frame is then committed. None succeeded → `stopped`.
 
 ---
 

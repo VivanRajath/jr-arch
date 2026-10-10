@@ -78,7 +78,7 @@ async function inRepo(box, fn) {
  * concurrency invariant is checked: the planner's promise is about who runs
  * together, not about who runs.
  */
-function scripted(byAgent) {
+function scripted(byAgent, { select = null } = {}) {
   const calls = [];
   const briefs = {};
   const live = new Set();
@@ -87,6 +87,15 @@ function scripted(byAgent) {
   const fn = async (_manifest, req) => {
     if (/handing it to someone else/.test(req.system ?? '')) {
       return { text: '{"completed":[]}', toolCalls: [], stopReason: 'end_turn' };
+    }
+    // Swarm selection. Left unanswered the loop falls back to file ownership,
+    // which answers a different question, so a test about selection has to
+    // answer this one.
+    if (/which agents a coding task needs/.test(req.system ?? '')) {
+      return {
+        text: select ? JSON.stringify({ agents: select }) : '',
+        toolCalls: [], stopReason: 'end_turn',
+      };
     }
     const who = Object.keys(byAgent).find((n) => req.system?.includes('You are `' + n + '`'));
     if (!who) return { text: '', toolCalls: [], stopReason: 'end_turn' };
@@ -311,6 +320,97 @@ describe('scope still decides who may run together', () => {
       });
       await run(['update both layers'], { swarm: true }, { call });
       assert.ok(call.overlaps.includes('api-dev+ui-dev'), 'the swarm serialised a safe pair');
+    });
+  });
+});
+
+describe('every candidate is considered, not just the first disjoint group', () => {
+  /**
+   * `swarmFor` used to take `swarmable(agents)[0]`. With three scoped agents
+   * where one overlaps another, the grouping splits them — and whoever landed
+   * in the second group could never swarm, however squarely the task sat in
+   * its scope. Now all three are candidates and the wave planner serialises
+   * only the pair that actually overlaps.
+   */
+  const THREE = [
+    { name: 'api-dev', parallel: true, owns: ['src/api/**'], attempts: 1 },
+    { name: 'ui-dev', parallel: true, owns: ['src/ui/**'], attempts: 1 },
+    // Overlaps ui-dev: src/ui/** vs src/** cannot be proven disjoint.
+    { name: 'wide-dev', parallel: true, owns: ['src/**'], attempts: 1 },
+  ];
+
+  test('an agent outside the first group still gets the work', async () => {
+    const box = sandbox(THREE);
+    await inRepo(box, async () => {
+      const call = scripted({
+        'api-dev': [
+          { tools: [tool('write_file', { path: 'src/api/handler.js', content: 'export const api = 2;\n' })] },
+          { tools: [tool('done', { summary: 'api' })] },
+        ],
+        'ui-dev': [
+          { tools: [tool('write_file', { path: 'src/ui/view.js', content: 'export const ui = 2;\n' })] },
+          { tools: [tool('done', { summary: 'ui' })] },
+        ],
+        'wide-dev': [
+          { tools: [tool('write_file', { path: 'src/shared.js', content: 'export const shared = 1;\n' })] },
+          { tools: [tool('done', { summary: 'shared' })] },
+        ],
+      }, { select: ['api-dev', 'ui-dev', 'wide-dev'] });
+      const out = await run(['touch all three areas'], { swarm: true }, { call });
+
+      // The third agent ran at all — that is the whole point.
+      assert.ok(call.count('wide-dev') > 0, 'the agent in the second group never ran');
+      assert.equal(out.status, 'done', out.reason ?? '');
+      assert.match(read(box.root, 'src/shared.js'), /shared = 1/);
+    });
+  });
+
+  test('but the overlapping pair is never concurrent', async () => {
+    const box = sandbox(THREE);
+    await inRepo(box, async () => {
+      const call = scripted({
+        'api-dev': [
+          { tools: [tool('write_file', { path: 'src/api/handler.js', content: 'export const api = 2;\n' })] },
+          { tools: [tool('done', { summary: 'api' })] },
+        ],
+        'ui-dev': [
+          { tools: [tool('write_file', { path: 'src/ui/view.js', content: 'export const ui = 2;\n' })] },
+          { tools: [tool('done', { summary: 'ui' })] },
+        ],
+        'wide-dev': [
+          { tools: [tool('write_file', { path: 'src/shared.js', content: 'export const shared = 1;\n' })] },
+          { tools: [tool('done', { summary: 'shared' })] },
+        ],
+      }, { select: ['api-dev', 'ui-dev', 'wide-dev'] });
+      await run(['touch all three areas'], { swarm: true }, { call });
+
+      // src/ui/** and src/** cannot be proven disjoint, so those two must land
+      // in different waves. Being wrong here costs the user's files.
+      for (const pair of call.overlaps) {
+        assert.ok(
+          !(pair.includes('ui-dev') && pair.includes('wide-dev')),
+          `overlapping scopes ran together: ${pair}`,
+        );
+      }
+    });
+  });
+
+  test('one candidate is not a swarm', async () => {
+    const box = sandbox([
+      { name: 'only-dev', parallel: true, owns: ['src/**'], attempts: 1 },
+      { name: 'helper', attempts: 1 },
+    ]);
+    await inRepo(box, async () => {
+      const call = scripted({
+        'only-dev': [{ tools: [tool('done', { summary: 'alone' })] }],
+        helper: [{ tools: [tool('done', { summary: 'alone' })] }],
+      });
+      // `helper` declares no scope and did not opt in, so there is exactly one
+      // candidate and the ladder runs instead. Asking for --swarm is not a
+      // reason to invent a second writer.
+      const out = await run(['a single-agent job'], { swarm: true }, { call });
+      assert.ok(['done', 'partial', 'stopped'].includes(out.status));
+      assert.equal(call.count('only-dev') + call.count('helper') > 0, true);
     });
   });
 });

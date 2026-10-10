@@ -587,19 +587,27 @@ function agentOf(ctx, name) {
  * touched, at one model call each.
  */
 export async function swarmFor(ctx, { task = '', files = [] } = {}) {
-  const groups = swarmable(ctx.agents).filter((g) => g.length > 1);
-  if (!groups.length) return null;
-  const group = groups[0];
+  // Every agent that opted in and declared a scope is a candidate.
+  //
+  // This used to take `swarmable(ctx.agents)[0]` — the first provably disjoint
+  // group — so an agent that happened to land in a second group could never
+  // swarm at all, however squarely the task sat in its scope. Which agents may
+  // run AT THE SAME TIME is no longer this function's problem: `swarm()`
+  // replans disjointness every wave, so overlapping picks are serialised into
+  // separate waves rather than excluded. This only has to answer whose work it
+  // is.
+  const candidates = ctx.agents.filter((a) => a.parallel && a.owns.length);
+  if (candidates.length < 2) return null;
 
-  const picked = await selectSwarm({ task, agents: group, manifest: ctx.manifest, call: ctx.call });
+  const picked = await selectSwarm({ task, agents: candidates, manifest: ctx.manifest, call: ctx.call });
   if (picked) {
-    const chosen = group.filter((a) => picked.includes(a.name));
+    const chosen = candidates.filter((a) => picked.includes(a.name));
     // One agent named is a real answer: it means this is not swarm work.
     return chosen.length > 1 ? chosen : null;
   }
 
-  const { claims } = partition(group, files);
-  const busy = group.filter((a) => (claims.get(a.name) ?? []).length);
+  const { claims } = partition(candidates, files);
+  const busy = candidates.filter((a) => (claims.get(a.name) ?? []).length);
   return busy.length > 1 ? busy : null;
 }
 
