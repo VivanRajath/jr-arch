@@ -13,8 +13,9 @@ That's the whole install. It asks for what it needs, one step at a time.
 - **Node 18 or newer.** No other runtime dependencies.
 - **A git repository** is strongly recommended. Every run works on its own
   branch, and failed attempts are rolled back through git.
-- **An API key** for Anthropic, Google Gemini, Groq, OpenAI, OpenRouter or
-  xAI. You can also use a local Ollama or any OpenAI-compatible endpoint.
+- **An API key** for Anthropic, Google Gemini, Groq, OpenAI, OpenRouter,
+  RouterPlus or xAI. You can also use a local Ollama or any OpenAI-compatible
+  endpoint.
 
 > Looking for how it works inside? See [ARCHITECTURE.md](ARCHITECTURE.md).
 > Working on the code itself? See [RUNBOOK.md](RUNBOOK.md).
@@ -303,13 +304,17 @@ flags never do, so `run --dry-run "task"` keeps the task.
 | xAI | `xai-…` | `XAI_API_KEY` | |
 | Google Gemini | `AIza…` | `GEMINI_API_KEY` | key from aistudio.google.com; uses Google's OpenAI-compatible endpoint |
 | OpenAI | `sk-…` | `OPENAI_API_KEY` | |
+| RouterPlus | `tm_vk_…` | `ROUTERPLUS_API_KEY` | a gateway: one key reaches Claude and GPT models. Use the `/v1` base URL, not the Claude-Code one |
 | Ollama | none | `OLLAMA_API_KEY` | type `ollama` instead of a key; runs locally |
 | Anything OpenAI-compatible | anything | `LLM_API_KEY` | Together, vLLM, LM Studio… you give the URL |
 
 When you paste a key, jr-arch recognises the provider from its prefix. The model
 list is always fetched live from the provider. Nothing is hard-coded, so you're
 never offered a model your key can't use. Speech, embedding, moderation,
-image and video models are filtered out because they can't call tools.
+image and video models are filtered out because they can't call tools — and so
+are *decision* models (`jev`, `kev`, `decider`, `gliner`), which a gateway
+lists beside chat models but which return a typed answer and cannot call a
+tool. jr-arch reaches a decision model through `routing.classifier` instead.
 
 Gemini keys (from aistudio.google.com) start with `AIza` and use Google's
 OpenAI-compatible endpoint. Gemini support is new and has been tested against

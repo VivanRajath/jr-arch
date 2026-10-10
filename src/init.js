@@ -15,6 +15,7 @@ const DEFAULT_MODEL = {
   openai: 'gpt-4o',
   groq: 'llama-3.3-70b-versatile',
   ollama: 'qwen2.5-coder:14b',
+  routerplus: 'claude-sonnet-5-5',
 };
 
 // Just the manifest and the contract; agents come from add-agent.

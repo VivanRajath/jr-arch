@@ -994,6 +994,7 @@ containing a cmd metacharacter or whitespace is **refused**. The same
 | `openrouter` | openai | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` | `sk-or-` |
 | `xai` | openai | `https://api.x.ai/v1` | `XAI_API_KEY` | `xai-` |
 | `gemini` | openai | `https://generativelanguage.googleapis.com/v1beta/openai` | `GEMINI_API_KEY` | `AIza` |
+| `routerplus` | openai | `https://api.routerplus.com/v1` | `ROUTERPLUS_API_KEY` | `tm_vk_` |
 | `openai` | openai | `https://api.openai.com/v1` | `OPENAI_API_KEY` | `sk-` (checked last) |
 | `ollama` | openai | `http://localhost:11434/v1` | `OLLAMA_API_KEY` | none (`noKey`) |
 | `openai-compatible` | openai | **none** | `LLM_API_KEY` | none |
@@ -1007,6 +1008,22 @@ than guessing a URL.
 `API_KEY_INVALID` — Google's way of rejecting a key. A leading `models/` is
 stripped from ids (Gemini lists `models/gemini-2.5-flash`; requests take the
 bare name). The list is filtered by `isChatModel` and sorted newest first.
+
+`isChatModel` drops three families, each because the model cannot call a tool
+and so cannot drive an agent: media and embedding models; a gateway's own test
+fixtures (`mock-*`, `demo-*`); and **decision models** — `jev`, `kev`,
+`decider`, `*-decisions`, `gliner`. RouterPlus lists 47 models of which 15 are
+one of these, so without the filter a user picks one and the agent fails on its
+first move. A System One model is reached through `routing.classifier` (§6.1),
+never as a tier model.
+
+RouterPlus is a gateway rather than a vendor: one key fronts Anthropic's and
+OpenAI's models, and it also publishes `rp-`prefixed aliases of the Claude ids.
+Its Anthropic-wire endpoint drops the `/v1` and wants `ANTHROPIC_AUTH_TOKEN`
+rather than `x-api-key`, so the registry points at the OpenAI-compatible
+surface, which exposes every model it fronts including the Claude ones. It
+returns no rate-limit headers, so `probeLimits` finds nothing and the budget
+layer runs without a measured per-minute ceiling.
 
 Gemini is served through Google's OpenAI-compatible endpoint, so it needs no
 wire format of its own. What differs is detail, and each detail is handled

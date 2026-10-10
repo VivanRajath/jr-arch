@@ -183,3 +183,89 @@ describe('the key goes only to its own provider', () => {
     }
   });
 });
+
+describe('RouterPlus', () => {
+  /**
+   * A gateway rather than a model vendor: one key reaches Anthropic's and
+   * OpenAI's models through an OpenAI-compatible surface. Everything here is
+   * checked against the shape the live API actually returned.
+   */
+  test('a tm_vk_ key is recognised, and nothing else claims it', () => {
+    assert.equal(detectProvider('tm_vk_fc58c072f3c923174ffa0'), 'routerplus');
+    // The catch-all `sk-` must not have taken it first, and no other prefix
+    // may claim a RouterPlus key.
+    for (const k of ['sk-ant-api03-x', 'gsk_abc', 'sk-or-v1-x', 'xai-abc', 'AIzaSyAbc', 'sk-proj-abc']) {
+      assert.notEqual(detectProvider(k), 'routerplus', `${k} was read as RouterPlus`);
+    }
+  });
+
+  test('it resolves to its own endpoint, on the OpenAI wire', () => {
+    assert.equal(baseUrlFor('routerplus'), 'https://api.routerplus.com/v1');
+    assert.equal(PROVIDERS.routerplus.wire, 'openai');
+    assert.equal(PROVIDERS.routerplus.keyEnv, 'ROUTERPLUS_API_KEY');
+  });
+
+  test('a key only ever goes to RouterPlus', async () => {
+    const f = fakeFetch(() => ({ status: 200, body: { data: [{ id: 'claude-sonnet-5-5' }] } }));
+    await listModels('routerplus', 'tm_vk_test', { fetchImpl: f });
+    assert.equal(f.seen.length, 1);
+    assert.match(f.seen[0].url, /^https:\/\/api\.routerplus\.com\/v1\/models$/);
+    assert.equal(f.seen[0].headers.authorization, 'Bearer tm_vk_test');
+  });
+
+  /**
+   * The real list, trimmed to the interesting rows. A gateway lists decision
+   * models and image models beside chat models, and neither can call a tool —
+   * so offering them as an agent's model offers a guaranteed failure.
+   */
+  test('decision and image models are dropped from what a key can pick', async () => {
+    const f = fakeFetch(() => ({
+      status: 200,
+      body: {
+        object: 'list',
+        data: [
+          { id: 'claude-sonnet-5-5' }, { id: 'claude-haiku-5-5' }, { id: 'gpt-6-luna' },
+          { id: 'rp-sonnet-5-5' },
+          { id: 'typesafe/jev-1.13' }, { id: 'routerplus/kev-4b' }, { id: 'routerplus/decider-2b' },
+          { id: 'perplexity/pplx-decider-v1-27b' }, { id: 'openai/gpt-6-luna-decisions' },
+          { id: 'fastino/gliner-2.5-decide' },
+          { id: 'gpt-image-2' }, { id: 'mock-image-1' }, { id: 'mock-1' }, { id: 'demo-1' },
+        ],
+      },
+    }));
+    const ids = (await listModels('routerplus', 'tm_vk_test', { fetchImpl: f })).map((m) => m.id);
+
+    for (const keep of ['claude-sonnet-5-5', 'claude-haiku-5-5', 'gpt-6-luna', 'rp-sonnet-5-5']) {
+      assert.ok(ids.includes(keep), `${keep} should be offerable`);
+    }
+    for (const drop of [
+      'typesafe/jev-1.13', 'routerplus/kev-4b', 'routerplus/decider-2b',
+      'perplexity/pplx-decider-v1-27b', 'openai/gpt-6-luna-decisions',
+      'fastino/gliner-2.5-decide', 'gpt-image-2', 'mock-image-1', 'mock-1', 'demo-1',
+    ]) {
+      assert.ok(!ids.includes(drop), `${drop} cannot call a tool and must not be offered`);
+    }
+  });
+
+  // A System One model is reached through routing.classifier, never as a tier
+  // model, so the filter dropping it is the whole point rather than a loss.
+  test('a decision model is not a chat model', () => {
+    assert.equal(isChatModel('typesafe/jev-1.13'), false);
+    assert.equal(isChatModel('jev-latest'), false);
+    assert.equal(isChatModel('routerplus/decider-2b'), false);
+    assert.equal(isChatModel('fastino/gliner-2.5-decide'), false);
+  });
+
+  // Over-filtering costs a user a model they are paying for, so the patterns
+  // must not catch a real coding model.
+  test('the new patterns do not swallow real models', () => {
+    for (const id of [
+      'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-haiku-5-5', 'claude-fable-5-1',
+      'gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra', 'gpt-4o', 'gpt-4.1-mini',
+      'llama-3.3-70b-versatile', 'qwen/qwen3.8-27b', 'bespokelabs/nimble-v3',
+      'levanto/sage-1.2', 'cloudflare/clef', 'deepseek-coder', 'devstral-small',
+    ]) {
+      assert.equal(isChatModel(id), true, `${id} was filtered out`);
+    }
+  });
+});

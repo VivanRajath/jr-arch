@@ -291,7 +291,7 @@ export async function offerRouter(prompter, { fetchImpl = fetch, limits = null, 
 }
 
 export async function obtainKey(prompter, { fetchImpl = fetch, attempts = 3, stash = [] } = {}) {
-  info(`Paste an API key. ${c.d('Supported: Anthropic, Gemini, Groq, OpenAI, OpenRouter, xAI — or type')} ${c.c('ollama')} ${c.d('for a local model.')}`);
+  info(`Paste an API key. ${c.d('Supported: Anthropic, Gemini, Groq, OpenAI, OpenRouter, RouterPlus, xAI — or type')} ${c.c('ollama')} ${c.d('for a local model.')}`);
 
   for (let tries = 0; tries < attempts; tries++) {
     const raw = await prompter.secret('API key:');
@@ -328,7 +328,7 @@ export async function obtainKey(prompter, { fetchImpl = fetch, attempts = 3, sta
       } else {
         info("I can't tell whose key that is from its format.");
         provider = await prompter.choose('Which provider is it for?', [
-          ...['anthropic', 'groq', 'openai', 'openrouter', 'xai', 'gemini'].map((id) => ({ value: id, label: PROVIDERS[id].label })),
+          ...['anthropic', 'groq', 'openai', 'openrouter', 'xai', 'gemini', 'routerplus'].map((id) => ({ value: id, label: PROVIDERS[id].label })),
           { value: 'openai-compatible', label: 'Something else (OpenAI-compatible)' },
         ]);
         if (provider === null) return null;

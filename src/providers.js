@@ -54,6 +54,20 @@ export const PROVIDERS = {
     keyPattern: /^AIza/,
     signup: 'aistudio.google.com/apikey',
   },
+  routerplus: {
+    label: 'RouterPlus',
+    // A gateway, not a model vendor: one key reaches Anthropic, OpenAI and
+    // others. Its OpenAI-compatible surface is the one to use, because that is
+    // the shape every model it fronts is exposed in — including the Claude
+    // ones. Its Anthropic-wire endpoint drops the `/v1` and wants a different
+    // auth header, so pointing `wire: 'anthropic'` at it would need its own
+    // request path for no gain.
+    wire: 'openai',
+    base: 'https://api.routerplus.com/v1',
+    keyEnv: 'ROUTERPLUS_API_KEY',
+    keyPattern: /^tm_vk_/,
+    signup: 'app.routerplus.com/console/keys',
+  },
   openai: {
     label: 'OpenAI',
     wire: 'openai',
@@ -84,7 +98,7 @@ export const PROVIDERS = {
 };
 
 /** Order matters: the most specific prefixes are tried first. */
-const DETECT_ORDER = ['anthropic', 'groq', 'openrouter', 'xai', 'gemini', 'openai'];
+const DETECT_ORDER = ['anthropic', 'groq', 'openrouter', 'xai', 'gemini', 'routerplus', 'openai'];
 
 /**
  * Best guess at which provider a key belongs to, from its prefix.
@@ -211,5 +225,18 @@ export function isChatModel(id) {
   // orpheus is Groq's text-to-speech model; its id has no "tts" in it. aqa,
   // veo and lyria are Gemini's attributed-answer, video and music models
   // (imagen is caught by "image").
-  return !/whisper|tts|embed|moderation|guard|dall-e|image|audio|transcri|realtime|search-preview|playai|orpheus|\baqa\b|\bveo\b|lyria/i.test(id);
+  if (/whisper|tts|embed|moderation|guard|dall-e|image|audio|transcri|realtime|search-preview|playai|orpheus|\baqa\b|\bveo\b|lyria/i.test(id)) return false;
+
+  // Decision models — System One and friends. A gateway lists them beside chat
+  // models because they are models, but they return a typed answer and cannot
+  // call a tool, so picking one as an agent's model is picking an agent that
+  // fails on its first move. jev, kev, decider, gliner (zero-shot extraction)
+  // and anything naming itself a decision model are all this category; jr-arch
+  // reaches a System One model through `routing.classifier`, never here.
+  if (/\bjev\b|jev-|\bkev\b|kev-|decider|decision|-decide|gliner/i.test(id)) return false;
+
+  // A gateway's own test fixtures. They answer, but not with work.
+  if (/^(?:mock|demo)(?:-|$)/i.test(id)) return false;
+
+  return true;
 }
