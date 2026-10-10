@@ -773,6 +773,10 @@ Commit-by-commit, with what changed and why. All dates are 2026.
 | 09-19 | `72e3319` | **chore**: 0.1.10 | — |
 | 09-23 | `aec762f` | **feat**: optional System One classifier for tier selection | `routing.classifier` → `classify-fast.js`; a calibrated probability makes `classifier_confidence_floor` mean what it says, and routing stops costing a generation. Opt-in, always allowed to decline, never enforces. `withFloor()` shared by both paths; `num()` read a missing confidence as 0 because `Number(null)` is finite |
 | 09-23 | `4028882` | **chore**: untrack `CLAUDE.md` | design notes stay on disk, out of the repo; not in `package.json` "files", so the tarball is unchanged |
+| 10-10 | `22eacb8` | **fix**: correct the Jev request shape; list models for the key check | `instructions` not `description`, `criteria` map not `options` array — taken from the SDK source after installing and removing it. `GET /v1/models` exists; `verifyKey` uses it, so the key check spends no tokens. Zero dependencies intact |
+| 10-10 | `48216f6` | **feat**: a swarm runs in waves, retries and escalates | Closes roadmap 5. Per-agent `attempts`, then `escalates_to`; heir briefed from the shared ledger. Disjointness replanned every wave, so an unscoped heir runs alone. `MAX_WAVES` backstop |
+| 10-10 | `a21a300` | **feat**: every parallel agent is a swarm candidate | `swarmFor` took `swarmable()[0]`, so an agent in a second group was unreachable. Overlapping picks are now serialised into later waves instead of excluded |
+| 10-10 | — | **chore**: 0.1.11 | — |
 
 ---
 
