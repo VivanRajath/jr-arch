@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   CLASSIFIERS, classifierConfig, fastClassify, fastSwarm, answerFor, stateFor,
-  classifierByName, verifyKey, detectClassifier,
+  classifierByName, verifyKey, detectClassifier, modelNames, criteriaFor, choice, noul,
 } from '../src/classify-fast.js';
 import { KeyRejected, detectProvider } from '../src/providers.js';
 import { envTemplate } from '../src/env.js';
@@ -32,21 +32,41 @@ const CONFIGURED = {
   classifier: { provider: 'typesafe', model: null, keyEnv: 'TYPESAFE_TEST_KEY', baseUrl: null },
 };
 
-/** A stub System One endpoint. Records requests, replies with whatever is given. */
-function endpoint(reply, { status = 200 } = {}) {
+/**
+ * A stub System One endpoint. Records requests, replies with whatever is given.
+ *
+ * Returns a real `Response`, not a hand-made lookalike: the SDK reads
+ * `res.headers` for request ids and retry hints, so a plain object with `json`
+ * and `text` on it is not enough to exercise the path users get.
+ */
+function endpoint(reply, { status = 200, headers = {} } = {}) {
   const calls = [];
   const fn = async (url, init) => {
-    calls.push({ url, init, body: JSON.parse(init.body) });
-    const body = typeof reply === 'function' ? reply(JSON.parse(init.body)) : reply;
-    return {
-      ok: status >= 200 && status < 300,
+    const body = init?.body ? JSON.parse(init.body) : null;
+    calls.push({ url, init, body });
+    const out = typeof reply === 'function' ? reply(body) : reply;
+    return new Response(JSON.stringify(out), {
       status,
-      json: async () => body,
-      text: async () => JSON.stringify(body),
-    };
+      headers: { 'content-type': 'application/json', ...headers },
+    });
   };
   fn.calls = calls;
   return fn;
+}
+
+/**
+ * The Authorization header, however the client chose to express it.
+ *
+ * Headers may arrive as a `Headers` instance or a plain object, and the name's
+ * case is not ours to decide, so a test that pins one spelling is testing the
+ * SDK's style rather than our behaviour.
+ */
+function authOf(init) {
+  const h = init?.headers;
+  if (!h) return undefined;
+  if (typeof h.get === 'function') return h.get('authorization') ?? undefined;
+  const hit = Object.keys(h).find((k) => k.toLowerCase() === 'authorization');
+  return hit ? h[hit] : undefined;
 }
 
 /** A stub chat model, so a fallback is visible as a call that happened. */
@@ -109,16 +129,65 @@ describe('configuration', () => {
 });
 
 describe('the request', () => {
-  test('options are the installed agents, never a hard-coded list', async () => {
+  test('the labels are the installed agents, never a hard-coded list', async () => {
     const fetchImpl = endpoint(answered('ui-editor'));
     await withKey('sk-test', () =>
       fastClassify({ task: 'restyle the header', agents: AGENTS, manifest: CONFIGURED, fetchImpl }));
 
     const { body, url, init } = fetchImpl.calls[0];
     assert.equal(url, 'https://api.typesafe.ai/v1/systemone');
-    assert.equal(init.headers.authorization, 'Bearer sk-test');
-    assert.deepEqual(body.questions.tier.options, AGENTS.map((a) => a.name));
+    assert.equal(authOf(init), 'Bearer sk-test');
     assert.equal(body.questions.tier.type, 'choice');
+    assert.deepEqual(Object.keys(body.questions.tier.criteria), AGENTS.map((a) => a.name));
+  });
+
+  /**
+   * The wire shape, pinned against the published SDK.
+   *
+   * The first version of this file was written from the prose documentation
+   * and used `description` and an `options` array. Both are wrong, and every
+   * live check we ran was a 401 — authentication fails before the body is
+   * validated, so a malformed request looked exactly like a bad key.
+   */
+  test('a question carries instructions and criteria, not description and options', async () => {
+    const fetchImpl = endpoint(answered('junior-dev'));
+    await withKey('sk-test', () =>
+      fastClassify({ task: 't', agents: AGENTS, manifest: CONFIGURED, fetchImpl }));
+
+    const q = fetchImpl.calls[0].body.questions.tier;
+    assert.equal(typeof q.instructions, 'string', 'the prompt field is `instructions`');
+    assert.equal(q.description, undefined, '`description` is not a field the API takes');
+    assert.equal(q.options, undefined, '`options` is not a field the API takes');
+    assert.ok(q.criteria && !Array.isArray(q.criteria), 'choice criteria are a map, not a list');
+  });
+
+  test('each label is described by what that agent declares about itself', async () => {
+    const fetchImpl = endpoint(answered('ui-editor'));
+    await withKey('sk-test', () =>
+      fastClassify({ task: 't', agents: AGENTS, manifest: CONFIGURED, fetchImpl }));
+
+    const criteria = fetchImpl.calls[0].body.questions.tier.criteria;
+    const fixer = AGENTS.find((a) => a.fixesBuild);
+    const terminal = AGENTS.find((a) => a.terminal);
+    if (fixer) assert.match(criteria[fixer.name], /repairs broken builds/);
+    if (terminal) assert.match(criteria[terminal.name], /asks a human/);
+    const scoped = AGENTS.find((a) => a.owns?.length);
+    if (scoped) assert.match(criteria[scoped.name], /owns /);
+  });
+
+  test('swarm nouls carry instructions and yes/no criteria', async () => {
+    const pair = [
+      { name: 'scout', parallel: true, owns: ['docs/**'], priority: 1 },
+      { name: 'archivist', parallel: true, owns: ['data/**'], priority: 2 },
+    ];
+    const fetchImpl = endpoint({ answers: {} });
+    await withKey('sk-test', () => fastSwarm({ task: 't', agents: pair, manifest: CONFIGURED, fetchImpl }));
+
+    const q = fetchImpl.calls[0].body.questions.a0;
+    assert.equal(q.type, 'noul');
+    assert.equal(typeof q.instructions, 'string');
+    assert.equal(q.description, undefined);
+    assert.deepEqual(Object.keys(q.criteria).sort(), ['no', 'yes']);
   });
 
   test('state is structured, and carries the repo state a tier is chosen from', () => {
@@ -364,11 +433,9 @@ describe('it never decides enforcement', () => {
 });
 
 describe('adding a Jev key, the way other providers are added', () => {
-  const okRes = (body, status = 200) => ({
-    ok: status >= 200 && status < 300,
+  const okRes = (body, status = 200) => new Response(JSON.stringify(body), {
     status,
-    json: async () => body,
-    text: async () => JSON.stringify(body),
+    headers: { 'content-type': 'application/json' },
   });
 
   test('people type the model name, not the company', () => {
@@ -380,14 +447,37 @@ describe('adding a Jev key, the way other providers are added', () => {
     assert.equal(classifierByName(''), null);
   });
 
-  test('a working key reports the model it reaches', async () => {
+  // Listing models is the key check, the same as it is for every chat
+  // provider. It spends no tokens and returns the real list.
+  test('a working key is proved by listing models, not by spending one', async () => {
     const seen = [];
-    const fetchImpl = async (url, init) => { seen.push({ url, init }); return okRes({ answers: { ok: { choice: 'yes' } } }); };
+    const fetchImpl = async (url, init) => {
+      seen.push({ url, init });
+      return okRes({ models: [{ id: 'jev-latest' }, { id: 'jev-1' }] });
+    };
     const found = await verifyKey({ key: 'sk-good', fetchImpl });
+    assert.equal(seen[0].url, 'https://api.typesafe.ai/v1/models');
+    assert.equal(seen[0].init.method, 'GET');
+    assert.equal(seen[0].init.body, undefined, 'a key check must not spend tokens');
+    assert.equal(authOf(seen[0].init), 'Bearer sk-good');
+    assert.deepEqual(found.models, ['jev-latest', 'jev-1']);
     assert.equal(found.model, 'jev-latest');
     assert.equal(found.keyEnv, 'TYPESAFE_API_KEY');
-    assert.equal(seen[0].url, 'https://api.typesafe.ai/v1/systemone');
-    assert.equal(seen[0].init.headers.authorization, 'Bearer sk-good');
+  });
+
+  test('the model list is read whatever the element shape is', () => {
+    assert.deepEqual(modelNames({ models: ['a', 'b'] }), ['a', 'b']);
+    assert.deepEqual(modelNames({ models: [{ id: 'a' }, { name: 'b' }, { model: 'c' }] }), ['a', 'b', 'c']);
+    assert.deepEqual(modelNames({ models: [{ nothing: 1 }, null, 'ok'] }), ['ok'], 'junk is skipped, never stringified');
+    assert.deepEqual(modelNames(null), []);
+  });
+
+  // An empty list is not a failure: the key authenticated, which is the thing
+  // being checked. There still has to be a name to show.
+  test('an empty list still yields the configured default', async () => {
+    const found = await verifyKey({ key: 'sk-good', fetchImpl: async () => okRes({ models: [] }) });
+    assert.equal(found.model, 'jev-latest');
+    assert.deepEqual(found.models, []);
   });
 
   // The key being checked has not been saved yet, so it must not be read from
@@ -397,7 +487,7 @@ describe('adding a Jev key, the way other providers are added', () => {
     process.env.TYPESAFE_API_KEY = 'sk-a-different-saved-key';
     try {
       let sent = null;
-      await verifyKey({ key: 'sk-the-one-being-checked', fetchImpl: async (u, i) => { sent = i.headers.authorization; return okRes({}); } });
+      await verifyKey({ key: 'sk-the-one-being-checked', fetchImpl: async (u, i) => { sent = authOf(i); return okRes({ models: [] }); } });
       assert.equal(sent, 'Bearer sk-the-one-being-checked');
     } finally {
       if (had === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = had;

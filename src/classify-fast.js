@@ -26,10 +26,32 @@
  *      not recognise — every one of them returns null and the existing model
  *      classifier runs. A beta API must not become the thing that decides
  *      whether this tool can route at all.
+ *
+ * Raw `fetch`, not the official SDK, because zero runtime dependencies is a
+ * promise this project keeps. The SDK was installed once, read, and removed:
+ * the request shapes below come from its source rather than from the prose
+ * documentation, which had two fields wrong. `instructions`, not
+ * `description`; `criteria` as a label→description map, not an `options`
+ * array. Neither error could surface in testing, because a bad key fails
+ * authentication before the body is validated — so every live check returned
+ * 401 and looked like a key problem.
+ *
+ * If this drifts, `npm pack @typesafe-ai/sdk` and read `dist/index.mjs` (one
+ * dependency-free file) rather than guessing from the docs again.
  */
 
 import { redact } from './provider.js';
 import { KeyRejected } from './providers.js';
+
+/**
+ * The three question primitives, in the shape the API actually takes.
+ *
+ * `criteria` being a map is the better shape for us anyway: each label carries
+ * its own meaning, so an agent's own declared role describes choosing it.
+ */
+export const choice = (instructions, criteria) => ({ type: 'choice', instructions, criteria });
+export const noul = (instructions, criteria = undefined) => ({ type: 'noul', instructions, criteria });
+export const score = (instructions, criteria) => ({ type: 'score', instructions, criteria });
 
 /**
  * The System One endpoints, kept as a table for the same reason `providers.js`
@@ -39,8 +61,9 @@ import { KeyRejected } from './providers.js';
 export const CLASSIFIERS = {
   typesafe: {
     label: 'TypeSafe (Jev)',
-    base: 'https://api.typesafe.ai/v1',
-    path: '/systemone',
+    base: 'https://api.typesafe.ai',
+    path: '/v1/systemone',
+    modelsPath: '/v1/models',
     keyEnv: 'TYPESAFE_API_KEY',
     defaultModel: 'jev-latest',
     signup: 'console.typesafe.ai/settings/keys',
@@ -103,6 +126,7 @@ export function classifierConfig(manifest) {
     keyEnv: cfg.keyEnv || spec.keyEnv,
     baseUrl: String(cfg.baseUrl || spec.base).replace(/\/$/, ''),
     path: spec.path,
+    modelsPath: spec.modelsPath,
     signup: spec.signup,
   };
 }
@@ -112,29 +136,24 @@ export function classifierConfig(manifest) {
 // ---------------------------------------------------------------------------
 
 /**
- * One System One request: structured state in, typed answers out.
- *
- * Throws on anything unusual. Every caller in this file catches and returns
- * null, because the whole point is that a failure here is not a failed run.
+ * One request, with the key never leaving this function.
  *
  * `fetchImpl` is injectable so tests never touch the network, the same way
  * `listModels` does it.
  */
-export async function ask({ config, state, questions, fetchImpl = fetch, timeout = TIMEOUT } = {}) {
-  const key = process.env[config.keyEnv] || '';
+async function send({ config, key, path, method = 'POST', body = null, fetchImpl = fetch, timeout = TIMEOUT }) {
   if (!key) throw new Error(`$${config.keyEnv} is not set`);
-
   const control = new AbortController();
   const timer = setTimeout(() => control.abort(), timeout);
   let res;
   try {
-    res = await fetchImpl(`${config.baseUrl}${config.path}`, {
-      method: 'POST',
+    res = await fetchImpl(`${config.baseUrl}${path}`, {
+      method,
       headers: {
-        'content-type': 'application/json',
         authorization: `Bearer ${key}`,
+        ...(body ? { 'content-type': 'application/json' } : {}),
       },
-      body: JSON.stringify({ model: config.model, state, questions }),
+      ...(body ? { body: JSON.stringify(body) } : {}),
       signal: control.signal,
     });
   } catch (err) {
@@ -142,7 +161,21 @@ export async function ask({ config, state, questions, fetchImpl = fetch, timeout
   } finally {
     clearTimeout(timer);
   }
+  return res;
+}
 
+/**
+ * One System One request: structured state in, typed answers out.
+ *
+ * Throws on anything unusual. Every caller in this file catches and returns
+ * null, because the whole point is that a failure here is not a failed run.
+ */
+export async function ask({ config, state, questions, fetchImpl = fetch, timeout = TIMEOUT } = {}) {
+  const key = process.env[config.keyEnv] || '';
+  const res = await send({
+    config, key, path: config.path, fetchImpl, timeout,
+    body: { model: config.model, state, questions },
+  });
   if (!res.ok) {
     const text = redact(await res.text().catch(() => ''), key);
     throw new Error(`${config.label} answered ${res.status}: ${text.slice(0, 200)}`);
@@ -197,11 +230,12 @@ function num(v) {
 /**
  * Does this key work, and what does it reach?
  *
- * For a chat provider the key check is `listModels` — a wrong key is caught at
- * setup rather than as a 401 on the first task. A System One model publishes no
- * model list, so the equivalent is the smallest real question we can ask: one
- * two-option choice over a scrap of state. It costs a fraction of a cent and
- * proves the same thing, which is the point of checking at all.
+ * `GET /v1/models`, which is the same key check every chat provider gets and
+ * the same reason: a wrong key is caught while setting up rather than as a 401
+ * on the first task. An earlier version of this asked a throwaway inference
+ * question instead, on the belief that a System One model published no model
+ * list. It does. A GET costs nothing, spends no tokens, and returns the real
+ * list rather than the one name we had hard-coded.
  *
  * Throws `KeyRejected` for a key the provider refused, so callers can tell
  * "wrong key" from "no network" and say something useful about each.
@@ -216,32 +250,13 @@ export async function verifyKey({ provider = 'typesafe', key, baseUrl = null, fe
     keyEnv: spec.keyEnv,
     baseUrl: String(baseUrl || spec.base).replace(/\/$/, ''),
     path: spec.path,
+    modelsPath: spec.modelsPath,
     signup: spec.signup,
   };
 
-  // ask() reads the key from the environment, which is exactly what we are
-  // trying to avoid doing here: the key being checked has not been saved yet,
-  // and must not be written before it is known to work.
-  const control = new AbortController();
-  const timer = setTimeout(() => control.abort(), timeout);
-  let res;
-  try {
-    res = await fetchImpl(`${config.baseUrl}${config.path}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model: config.model,
-        state: { check: 'connectivity' },
-        questions: { ok: { type: 'choice', options: ['yes', 'no'], description: 'Answer yes.' } },
-      }),
-      signal: control.signal,
-    });
-  } catch (err) {
-    throw new Error(redact(err?.message ?? String(err), key));
-  } finally {
-    clearTimeout(timer);
-  }
-
+  // The key being checked has not been saved yet, so it is passed in rather
+  // than read from the environment — it must not be written before it works.
+  const res = await send({ config, key, path: config.modelsPath, method: 'GET', fetchImpl, timeout });
   if (res.status === 401 || res.status === 403) {
     throw new KeyRejected(`${config.label} rejected that key.`);
   }
@@ -249,14 +264,61 @@ export async function verifyKey({ provider = 'typesafe', key, baseUrl = null, fe
     const text = redact(await res.text().catch(() => ''), key);
     throw new Error(`${config.label} answered ${res.status}: ${text.slice(0, 200)}`);
   }
-  // A 200 is the proof. The answer itself does not matter — we asked a
-  // question with no wrong answer precisely so it could not fail on content.
-  return { provider, label: config.label, model: config.model, keyEnv: config.keyEnv };
+  const models = modelNames(await res.json().catch(() => null));
+
+  return {
+    provider,
+    label: config.label,
+    keyEnv: config.keyEnv,
+    models,
+    // The configured default when the list does not contain it, so the caller
+    // always has a name to show. A list that came back empty is not an error:
+    // the key authenticated, which is what was being checked.
+    model: models.includes(config.model) ? config.model : (models[0] ?? config.model),
+  };
+}
+
+/**
+ * Model names from the SDK's model list, without assuming the element shape.
+ *
+ * `models.list()` unwraps to the array itself; the raw `{ models: [...] }`
+ * envelope is accepted too so this stays usable either way. Each entry may be
+ * a bare string or an object naming itself, so both are read and anything else
+ * is skipped rather than turned into "[object Object]" in a menu.
+ */
+export function modelNames(wire) {
+  const list = Array.isArray(wire?.models) ? wire.models : Array.isArray(wire) ? wire : [];
+  return list
+    .map((m) => (typeof m === 'string' ? m : m?.id ?? m?.name ?? m?.model ?? null))
+    .filter((n) => typeof n === 'string' && n.trim())
+    .map((n) => n.trim());
 }
 
 // ---------------------------------------------------------------------------
 // Tier selection
 // ---------------------------------------------------------------------------
+
+/**
+ * Each agent as a labelled alternative: its name, described by what it says it
+ * is for.
+ *
+ * `criteria` is a map rather than a list precisely so each option can explain
+ * itself, and an agent already declares everything needed to do that — role,
+ * scope, whether it repairs builds, whether it is terminal.
+ */
+export function criteriaFor(agents) {
+  const out = {};
+  for (const a of agents) {
+    const bits = [
+      a.role || null,
+      a.owns?.length ? `owns ${a.owns.join(' ')}` : null,
+      a.fixesBuild ? 'repairs broken builds' : null,
+      a.terminal ? 'stops and asks a human rather than escalating' : null,
+    ].filter(Boolean);
+    out[a.name] = bits.join(' · ') || null;
+  }
+  return out;
+}
 
 const TIER_QUESTION =
   'Which agent should take this task? Choose by the state of the repository and ' +
@@ -289,9 +351,11 @@ export async function fastClassify({
       config,
       fetchImpl,
       state: stateFor({ task, buildGreen, files, agents, duties }),
-      // Options come from the directory, never from a list here. The rule that
-      // no default agent name appears in executable code holds by construction.
-      questions: { tier: { type: 'choice', options: tiers, description: TIER_QUESTION } },
+      // The labels come from the directory, never from a list here, so the rule
+      // that no default agent name appears in executable code holds by
+      // construction — and each label's description is the agent's OWN declared
+      // role, which is what an agent describing itself is for.
+      questions: { tier: choice(TIER_QUESTION, criteriaFor(agents)) },
     });
   } catch (err) {
     onNotice?.(`${config.label} classifier unavailable (${err.message}); using the model instead`);
@@ -397,13 +461,14 @@ export async function fastSwarm({
 
   const questions = {};
   agents.forEach((a, i) => {
-    questions[`a${i}`] = {
-      type: 'noul',
-      description:
-        `Does this task genuinely require work inside \`${a.name}\`'s own scope` +
-        `${a.owns?.length ? ` (${a.owns.join(', ')})` : ''}? ` +
-        'Answering yes runs that agent and bills the user for a model call.',
-    };
+    questions[`a${i}`] = noul(
+      `Does this task genuinely require work inside \`${a.name}\`'s own scope` +
+      `${a.owns?.length ? ` (${a.owns.join(', ')})` : ''}?`,
+      {
+        yes: `${a.name} has work to do here — it will run, and cost a model call.`,
+        no: `${a.name} has nothing to do here.`,
+      },
+    );
   });
 
   let data;

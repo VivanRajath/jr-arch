@@ -379,7 +379,10 @@ async function routerKey(provider, value, manifest, { fetchImpl = fetch } = {}) 
     return;
   }
 
-  ok(`${c.b(info_.model)} ${c.d('· routes tasks to an agent, does not run one')}`);
+  const count = info_.models?.length ?? 0;
+  if (count) ok(`${count} model${count === 1 ? '' : 's'} available — using ${c.b(info_.model)}`);
+  else ok(`${c.b(info_.model)}`);
+  info(c.d('routes tasks to an agent; it is not a chat model and cannot run one'));
 
   const alreadyIgnored = ensureIgnored();
   writeKey(spec.keyEnv, value);

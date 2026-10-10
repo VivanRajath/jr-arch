@@ -231,6 +231,11 @@ export async function ensureRepo(prompter, root = repoRoot()) {
  * Returns null for no, an unusable key, or a declined prompt — in every one of
  * those cases the tool works exactly as it does today.
  */
+/** The model in use, and how many the key can reach, when the list came back. */
+const describeRouter = (found) => (found.models?.length > 1
+  ? `${c.b(found.model)} ${c.d(`(of ${found.models.length})`)}`
+  : c.b(found.model));
+
 export async function offerRouter(prompter, { fetchImpl = fetch, limits = null, stash = [] } = {}) {
   // Already pasted at step 1: verify and use it, rather than asking again for
   // a key the person has already handed over.
@@ -242,7 +247,7 @@ export async function offerRouter(prompter, { fetchImpl = fetch, limits = null, 
     try {
       const found = await verifyKey({ provider: already.provider, key: already.key, fetchImpl });
       console.log(c.g('works'));
-      ok(`${c.b(found.model)} ${c.d('· routes tasks, does not run them')}`);
+      ok(`${describeRouter(found)} ${c.d('· routes tasks, does not run them')}`);
       return { provider: already.provider, keyEnv: found.keyEnv, key: already.key, model: found.model };
     } catch (e) {
       console.log(c.r('failed'));
@@ -274,7 +279,7 @@ export async function offerRouter(prompter, { fetchImpl = fetch, limits = null, 
   try {
     const found = await verifyKey({ provider: 'typesafe', key: raw.trim(), fetchImpl });
     console.log(c.g('works'));
-    ok(`${c.b(found.model)} ${c.d('· routes tasks, does not run them')}`);
+    ok(`${describeRouter(found)} ${c.d('· routes tasks, does not run them')}`);
     return { provider: 'typesafe', keyEnv: found.keyEnv, key: raw.trim(), model: found.model };
   } catch (e) {
     console.log(c.r('failed'));
