@@ -47,6 +47,7 @@ function sandbox(agents, { test: testScript = 'node -e "process.exit(0)"' } = {}
     if (a.attempts) fm.push(`attempts: ${a.attempts}`);
     if (a.escalatesTo) fm.push(`escalates_to: ${a.escalatesTo}`);
     if (a.terminal) fm.push('terminal: true');
+    if (a.fixesBuild) fm.push('fixes_build: true');
     if (a.owns?.length) {
       fm.push('owns:');
       for (const o of a.owns) fm.push(`  - "${o}"`);
@@ -411,6 +412,131 @@ describe('every candidate is considered, not just the first disjoint group', () 
       const out = await run(['a single-agent job'], { swarm: true }, { call });
       assert.ok(['done', 'partial', 'stopped'].includes(out.status));
       assert.equal(call.count('only-dev') + call.count('helper') > 0, true);
+    });
+  });
+});
+
+describe('each wave is gated before the next one starts', () => {
+  /**
+   * `verify()` used to run once, after every wave. A wave that broke the build
+   * was therefore not caught until the whole swarm had finished, and every
+   * later wave ran on a broken tree — each agent reading failures its siblings
+   * had caused. DUTIES entry rule 1 is the precedent: when the build is red,
+   * nothing else runs until it is green.
+   *
+   * `wide-dev` owns `src/**` and `ui-dev` owns `src/ui/**`, which cannot be
+   * proven disjoint, so they are forced into separate waves. That is what
+   * makes the ordering observable.
+   */
+  const BREAKS = 'node -e "const f=require(\'fs\');const s=f.existsSync(\'src/api/handler.js\')?f.readFileSync(\'src/api/handler.js\',\'utf8\'):\'\';process.exit(/BREAK/.test(s)?1:0)"';
+
+  // Priority decides wave order (agents sort by priority, then name), so the
+  // agent that breaks the build is pinned to wave 1 and `ui-dev` to wave 2.
+  const STAGED = [
+    { name: 'wide-dev', parallel: true, owns: ['src/**'], attempts: 1, priority: 1 },
+    { name: 'ui-dev', parallel: true, owns: ['src/ui/**'], attempts: 1, priority: 2 },
+    { name: 'mender', attempts: 1, fixesBuild: true, role: 'repairs builds', priority: 3 },
+  ];
+
+  test('a wave that breaks the build is repaired before the next wave runs', async () => {
+    const box = sandbox(STAGED, { test: BREAKS });
+    await inRepo(box, async () => {
+      const call = scripted({
+        // Wave 1: lands, and leaves the build red.
+        'wide-dev': [
+          { tools: [tool('write_file', { path: 'src/api/handler.js', content: 'export const api = 2; // BREAK\n' })] },
+          { tools: [tool('done', { summary: 'api changed, build now red' })] },
+        ],
+        // Called by the gate, between the waves.
+        mender: [
+          { tools: [tool('write_file', { path: 'src/api/handler.js', content: 'export const api = 2;\n' })] },
+          { tools: [tool('done', { summary: 'build green again' })] },
+        ],
+        // Wave 2: must not start until the build is green.
+        'ui-dev': [
+          { tools: [tool('write_file', { path: 'src/ui/view.js', content: 'export const ui = 2;\n' })] },
+          { tools: [tool('done', { summary: 'ui updated' })] },
+        ],
+      }, { select: ['wide-dev', 'ui-dev'] });
+
+      const out = await run(['change both, breaking the build on the way'], { swarm: true }, { call });
+
+      assert.ok(call.count('mender') > 0, 'the build repairer was never called');
+      // The ordering is the whole claim: repaired BETWEEN the waves, not after
+      // all of them.
+      const menderAt = call.calls.indexOf('mender');
+      const uiAt = call.calls.indexOf('ui-dev');
+      assert.ok(menderAt !== -1 && uiAt !== -1, 'both should have run');
+      assert.ok(menderAt < uiAt, `the repair ran after wave 2 (mender at ${menderAt}, ui-dev at ${uiAt})`);
+
+      assert.equal(out.build?.green, true, 'the swarm finished on a red build');
+      assert.match(read(box.root, 'src/api/handler.js'), /api = 2;\s*$/, 'BREAK was never removed');
+      assert.match(read(box.root, 'src/ui/view.js'), /ui = 2/);
+    });
+  });
+
+  test('a red build nobody can repair stops the swarm instead of running on', async () => {
+    const box = sandbox(
+      [
+        { name: 'wide-dev', parallel: true, owns: ['src/**'], attempts: 1, priority: 1 },
+        { name: 'ui-dev', parallel: true, owns: ['src/ui/**'], attempts: 1, priority: 2 },
+        // No fixes_build agent at all: there is nobody to delegate a red build to.
+      ],
+      { test: BREAKS },
+    );
+    await inRepo(box, async () => {
+      const call = scripted({
+        'wide-dev': [
+          { tools: [tool('write_file', { path: 'src/api/handler.js', content: 'export const api = 2; // BREAK\n' })] },
+          { tools: [tool('done', { summary: 'left the build red' })] },
+        ],
+        'ui-dev': [
+          { tools: [tool('write_file', { path: 'src/ui/view.js', content: 'export const ui = 2;\n' })] },
+          { tools: [tool('done', { summary: 'should never run' })] },
+        ],
+      }, { select: ['wide-dev', 'ui-dev'] });
+
+      const out = await run(['break it and keep going'], { swarm: true }, { call });
+
+      // Wave 2 is queued and must not be launched onto a broken tree.
+      assert.equal(call.count('ui-dev'), 0, 'a later wave ran on a red build');
+      assert.equal(out.build?.green, false);
+      assert.equal(out.status, 'partial');
+    });
+  });
+
+  // A build command is not free, and a wave that was entirely rolled back
+  // leaves the tree exactly as the previous verify already measured it.
+  test('a wave where nothing landed is not verified again', async () => {
+    const counter = 'node -e "require(\'fs\').appendFileSync(\'.verify.count\',\'x\');process.exit(0)"';
+    const box = sandbox(
+      [
+        { name: 'wide-dev', parallel: true, owns: ['src/**'], attempts: 2 },
+        { name: 'ui-dev', parallel: true, owns: ['src/ui/**'], attempts: 1 },
+      ],
+      { test: counter },
+    );
+    await inRepo(box, async () => {
+      const call = scripted({
+        // Fails its first attempt (rolled back, nothing landed), then succeeds.
+        'wide-dev': [
+          { text: 'no tool' },
+          { tools: [tool('write_file', { path: 'src/api/handler.js', content: 'export const api = 2;\n' })] },
+          { tools: [tool('done', { summary: 'second time' })] },
+        ],
+        'ui-dev': [
+          { tools: [tool('write_file', { path: 'src/ui/view.js', content: 'export const ui = 2;\n' })] },
+          { tools: [tool('done', { summary: 'ui' })] },
+        ],
+      }, { select: ['wide-dev', 'ui-dev'] });
+
+      await run(['two waves, one wasted attempt'], { swarm: true }, { call });
+
+      // Two waves landed work (wide-dev's retry, then ui-dev); the wasted
+      // attempt in between must not have triggered a third.
+      const runs = readFileSync(join(box.root, '.verify.count'), 'utf8').length;
+      assert.ok(runs >= 2, `expected a verify per landing wave, saw ${runs}`);
+      assert.ok(runs <= 4, `verify ran ${runs} times — a wave that landed nothing was verified`);
     });
   });
 });

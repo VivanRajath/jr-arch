@@ -778,6 +778,7 @@ Commit-by-commit, with what changed and why. All dates are 2026.
 | 10-10 | `a21a300` | **feat**: every parallel agent is a swarm candidate | `swarmFor` took `swarmable()[0]`, so an agent in a second group was unreachable. Overlapping picks are now serialised into later waves instead of excluded |
 | 10-10 | — | **chore**: 0.1.11 | — |
 | 10-10 | — | **feat**: RouterPlus provider | `tm_vk_` prefix, OpenAI-compatible surface at `api.routerplus.com/v1`. Verified live: detection, `GET /v1/models` (47 → 32 after filtering), and tool calling on `claude-haiku-5-5`. `isChatModel` extended to drop decision models (`jev`/`kev`/`decider`/`gliner`) and gateway fixtures (`mock-*`/`demo-*`), which a gateway lists beside chat models but which cannot call a tool. No rate-limit headers, so the budget layer runs without a measured ceiling |
+| 10-10 | — | **feat**: a swarm gates every wave | `verify()` ran once after every wave, so a wave that broke the build was caught only at the end and later waves ran on a broken tree. Now gated per wave, repaired through `callBuildDoctor` before the next starts, skipped when a wave landed nothing, and the loop stops when nobody can repair it. A final red re-stamps every frame so no stale green walks past `checkCommit` |
 
 ---
 

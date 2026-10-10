@@ -218,16 +218,11 @@ export async function run(positional, flags, { call = callModel, prompter = null
       : null;
     if (group) {
       const result = await swarm(ctx, group, { task: subject, brief });
-      // The same gate the ladder applies: a red build goes to whoever repairs
-      // builds, and only then is anything committed. Without this a swarm
-      // committed over a red build — every frame was closed with no verify
-      // result, and "unknown" only warns.
-      let build = result.build;
-      if (build.green === false && result.done.length) {
-        const repaired = await callBuildDoctor(ctx, result.done[0].frame, build);
-        build = repaired.build;
-      }
-      for (const d of result.done) d.frame.verify = build;
+      // The gate lives inside swarm(), once per wave, so that a wave which
+      // breaks the build is repaired before the next one runs rather than
+      // after all of them. It also stamps every frame with the build its
+      // commit answers for, so there is nothing left to do here.
+      const build = result.build;
 
       const outcome = result.done.length
         ? {
@@ -424,6 +419,13 @@ export async function swarm(ctx, group, { task, brief }) {
   // first wave starts from the task; every later one from the ledger.
   let queue = group.map((agent) => ({ agent, brief, reason: null }));
 
+  // The build, as of the last wave that actually changed anything. Null-green
+  // until something has been verified, which is not the same as passing.
+  let build = { green: null, label: null, output: '', reason: 'nothing verified yet' };
+  let verified = false;
+  // Why the loop stopped early, if it did.
+  let halted = null;
+
   for (let wave = 1; queue.length && wave <= MAX_WAVES; wave++) {
     // Only a provably disjoint subset may run together, and that has to be
     // re-decided every wave: the original group was checked by swarmable(),
@@ -454,11 +456,13 @@ export async function swarm(ctx, group, { task, brief }) {
     }));
 
     const next = [];
+    const landed = [];
     for (const { agent, frame, result, tierModel } of settled) {
       if (result.kind === 'done') {
         await gitLock(ctx, () => closeAttempt(ctx.session, frame, { status: 'done' }));
         ok(`${c.c(agent.name)} ${result.summary || 'done'}`);
         done.push({ agent, frame, result });
+        landed.push({ agent, frame, result });
         continue;
       }
 
@@ -504,19 +508,52 @@ export async function swarm(ctx, group, { task, brief }) {
         : `${agent.name}: ${result.reason ?? 'failed'} — retrying (${used[agent.name]}/${attemptsFor(agent.name)})`);
     }
 
+    // Gate the wave before the next one starts.
+    //
+    // This used to run once, after every wave. A wave that broke the build was
+    // therefore not caught until the whole swarm had finished, and every later
+    // wave ran on a broken tree — each agent reading failures its siblings had
+    // caused and trying to make sense of them. DUTIES entry rule 1 is the
+    // precedent: when the build is red, nothing else runs until it is green.
+    //
+    // Only when something actually landed. A wave in which every agent failed
+    // was rolled back to where it started, so there is nothing new to verify
+    // and a build command is not free.
+    if (landed.length) {
+      const check = await verifyAndGate(ctx);
+      build = check.build;
+      verified = true;
+      if (!check.ok) {
+        const repaired = await callBuildDoctor(ctx, landed[0].frame, check.build);
+        build = repaired.build;
+        if (!repaired.ok) halted = 'the build is red and could not be repaired';
+      }
+      // What this wave's work answers for, as the record of it.
+      for (const d of landed) d.frame.verify = build;
+    }
+
     // Deferred agents keep their brief; a requeued one may already be waiting,
     // and running the same agent twice in one wave is two writers again.
     queue = merge([...deferred, ...next]);
+    if (halted) break;
   }
 
   if (queue.length) {
-    warn(`swarm stopped after ${MAX_WAVES} waves with ${queue.length} agent(s) still queued`);
-    for (const q of queue) failed.push({ agent: q.agent, frame: null, result: { kind: 'failed', reason: `not reached within ${MAX_WAVES} waves` } });
+    const why = halted ?? `not reached within ${MAX_WAVES} waves`;
+    warn(`swarm stopped with ${queue.length} agent(s) still queued — ${why}`);
+    for (const q of queue) failed.push({ agent: q.agent, frame: null, result: { kind: 'failed', reason: why } });
   }
 
-  // Verify once, after every wave. Running it per agent would race on the same
-  // build directory and report each agent the others' failures.
-  const build = verify({ root: ctx.root });
+  // A swarm in which nothing ever landed still owes the caller a build result,
+  // and it has not been measured yet.
+  if (!verified) build = verify({ root: ctx.root });
+
+  // The LAST build is what every commit answers for, not the one its own wave
+  // saw. An earlier wave was green at the time, but committing its work while
+  // the tree is now red is exactly what `checkCommit` exists to refuse — and a
+  // stale green on the frame would walk straight past it.
+  if (build.green === false) for (const d of done) d.frame.verify = build;
+
   return { done, failed, build };
 }
 

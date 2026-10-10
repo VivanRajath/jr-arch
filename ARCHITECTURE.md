@@ -921,15 +921,35 @@ here, because `swarm()` replans it every wave.
 5. **Re-brief.** A retry or heir gets `compile(ctx.ledger, …)`, so it reads
    every sibling's recorded decisions, files and ruled-out approaches rather
    than the bare task. This is the shared-state half doing real work.
+6. **Gate the wave.** `verifyAndGate(ctx)`, and on red the `fixes_build` agent
+   through `callBuildDoctor` — before the next wave starts.
 
 `merge()` keeps one turn per agent, so two siblings escalating to the same heir
 queue it once and both reasons travel. `MAX_WAVES` (12) is a backstop that does
 not depend on what agents declare.
 
-`verify()` runs **once**, after every wave. A red build goes to the
-`fixes_build` agent first, exactly as on the ladder; each successful frame then
-carries that build result into `checkCommit`, so a swarm cannot commit over a
-red build.
+### The per-wave gate
+
+`verify()` used to run once, after every wave had finished. A wave that broke
+the build was therefore not caught until the swarm was over, and every later
+wave ran on a broken tree — each agent reading failures its siblings had caused
+and trying to make sense of them. DUTIES entry rule 1 is the precedent: when
+the build is red, nothing else runs until it is green.
+
+- The gate runs **only when something landed**. A wave in which every agent
+  failed was rolled back to where it started, so there is nothing new to
+  verify and a build command is not free.
+- A red build goes to the `fixes_build` agent as a nested attempt, exactly as
+  on the ladder, with the first frame that landed this wave as its parent.
+- If nobody can repair it, the loop **stops**. Remaining queued agents are
+  reported as not reached rather than launched onto a broken tree.
+- The **last** build is what every commit answers for. An earlier wave was
+  green at the time, but committing its work while the tree is now red is what
+  `checkCommit` exists to refuse, and a stale green left on the frame would
+  walk straight past it — so a final red re-stamps every finished frame.
+
+A swarm in which nothing ever landed still owes the caller a build result, so
+`verify()` runs once at the end in that case and in no other.
 
 Outcome: some succeeded → `done`, or `partial` if any failed. Each successful
 frame is then committed. None succeeded → `stopped`.

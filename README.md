@@ -668,6 +668,12 @@ An agent with no declared scope claims the whole tree, so it never runs beside
 another agent. That is the rule that makes concurrent writes safe, and it is
 re-checked every wave rather than once at the start.
 
+Your build or test command runs at the end of **each** wave, not just at the
+end. A wave that breaks it hands the repair to whichever agent declares
+`fixes_build` before the next wave starts — so later agents never read failures
+their siblings caused. If nothing can repair it, the swarm stops there and says
+so rather than piling more work onto a broken tree.
+
 Which agents a task actually needs is asked the same way the entry agent is,
 so a configured System One classifier answers it too — one yes/no per agent in
 a single request, instead of a model call that has to name them in free text.
